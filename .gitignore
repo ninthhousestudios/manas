@@ -1,0 +1,28 @@
+# Owned subsystems — each has its own git repo.
+chitta/
+smriti/
+sutra/
+sangha/
+mcpjungle/
+
+# Subsystems that are docs-only today but will become their own repos.
+# Keep tracked here for now; move out when they get their own crates.
+# (yojana, kosha, manas-cli intentionally NOT ignored)
+
+# Local agent state and indexes.
+.agents/
+.qartez/
+.claude/
+
+# Build artifacts.
+target/
+node_modules/
+dist/
+build/
+
+# Editor + OS noise.
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
