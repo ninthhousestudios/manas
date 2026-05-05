@@ -9,6 +9,11 @@ Session intent: port /done to two-layer skill-shell (manas-harness/7)
 
 1. **Sangha systemd service** — crash-looping with `ConnectionClosed("initialize request")`. The unit runs `sangha serve` (stdio mode) but something is trying to connect to it externally. Either fix the service to use `--http` or investigate what's connecting. Low priority — CC uses stdio MCP directly.
 
+--- we tried quite hard to get http to work with sangha and things just werent really
+working. later we will think more about sangha and how to connect sessions, because we
+also need to include codex, gemini and opencode. theres also a partially relevant note
+in ../todo.md.
+
 2. **mcpjungle Tool Group routing** — sub-sessions spawned by `manas done` only see mcpjungle. Chitta, sangha, sutra etc. need to be routable through mcpjungle's Tool Group binding so sub-agents can use them.
 
 3. **Next tasks (manas-harness):**

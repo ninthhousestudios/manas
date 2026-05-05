@@ -1,33 +1,22 @@
 # Handoff
 
-## What's done
+## In progress
 
-- All 8 v0 slices complete, 75 tests passing
-- 6 MCP tools: yojana_project, yojana_task, yojana_edge, yojana_query, yojana_ready, yojana_context
-- 3 context shapes: summary, working, review
-- mp-skills adapter docs in place
-- **All 17 review findings resolved** (waves 1-3)
-- Systemd user service running, MCP config in `~/.claude/settings.json`
-
-## Review fixes summary
-
-Waves 1+2: tag filter json_each, clear-to-NULL pattern, project status validation, neighbor-loading helper, cancel token, SIGTERM, JSON parse warnings, self-edge prevention, state transitions, env var warning, TOCTOU fix.
-
-Wave 3: migration versioning (`_yojana_migrations` table), pagination (limit/offset on list_tasks and list_projects, default 100), `in_progress` renamed to `in-progress` with data migration.
-
-Deferred (not needed yet): scoped cycle check (#13), scoped ready detection (#14), sequence number under pooling (#16).
+Nothing actively in progress in this repo.
 
 ## Pick up next
 
-- **First real use**: register tasks in yojana itself (dog-fooding)
-- **MCP config**: add yojana to other manas project `.claude/settings.json` files
+- **Wire vidhi skills as slash commands** — update `~/.claude/skill-index.md` to reference `~/soft/manas/vidhi/vidhi-*/SKILL.md`
+- **Bootstrap the brownfield project** — run `vidhi-init` in the target project to set up yojana as backend, then `vidhi-domain` → `vidhi-prd` → `vidhi-decompose` for the large feature
+- **Dog-food yojana** — register yojana's own deferred issues (scoped cycle check, scoped ready detection, sequence number under pooling) as yojana tasks
 
 ## Context needed
 
+- vidhi repo is at `~/soft/manas/vidhi/` (2 commits on main, MIT licensed)
+- vidhi-implement is the yojana-aware dispatcher — routes by task category to tdd/diagnose/architecture
+- vidhi-init now defaults to proposing yojana when MCP tools are available
 - Commit message workaround: panda breaks heredoc syntax. Use `printf ... > /tmp/file && git commit -F /tmp/file`
-- `sutra_impact` must be called before editing load-bearing files
 - Db uses parking_lot::Mutex — public methods must not call other public methods (deadlock)
 - Context assembler is pure — tool handler fetches data, assembler shapes it
 - TaskUpdates nullable fields use `Option<Option<String>>`: None=keep, Some(None)=clear, Some(Some(v))=set
-- Status is now `in-progress` (hyphenated), not `in_progress`
-- Migrations are versioned — add new ones as `0006_*.sql` and register in the MIGRATIONS const
+- Status is `in-progress` (hyphenated). Migrations versioned as `0006_*.sql`
