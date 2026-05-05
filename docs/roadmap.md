@@ -49,11 +49,12 @@ These are decisions/changes that block or shape later phases. Cheap now, expensi
 - Adopt the two-layer skill model as the path forward.
 - Skill markdown stays where it is for now (CC continues to work). New skills are Rust-shelled from day one.
 
-### 0.2 chitta `external_refs` column
-- Migration `0007_external_refs.sql`. JSONB array of `{type, value, as_of}`.
-- Update `store_memory` and `update_memory` schemas to accept typed refs.
-- Validate `type` against an allowlist (`smriti:hash`, `smriti:path`, `sutra:symbol`, `kosha:citation`, `yojana:task`, `chitta:memory`).
-- Backfill: optional. Existing JSONB metadata is unchanged; new code uses the typed column.
+### 0.2 unified typed-ref shape (chitta + yojana)
+- Specify the shape once: `{type, value, as_of, authority?}` with allowlisted types (`smriti:hash`, `smriti:path`, `sutra:symbol`, `kosha:citation`, `yojana:task`, `chitta:memory`, `doc:path`).
+- chitta migration `0007_external_refs.sql` adds a typed JSONB column using this shape.
+- yojana's `context_refs` column ships using the same shape from day one — **not** opaque strings. Yojana stores; manas-cli resolves (per principle 9).
+- Update `store_memory` / `update_memory` schemas to accept typed refs.
+- Backfill chitta: optional. Existing JSONB metadata unchanged; new code uses the typed column.
 
 ### 0.3 chitta soft-delete + retirement
 - Migration: `invalidated_at TIMESTAMPTZ NULL`, `metadata.retired_at`, `metadata.retirement_reason`.
@@ -66,6 +67,8 @@ These are decisions/changes that block or shape later phases. Cheap now, expensi
 
 ### 0.5 failure-semantics table
 - Codify the cross-subsystem failure-handling table from the arch doc. Each subsystem owner reviews their column.
+- Each fallback is classified **secure-degraded / insecure-emergency / prohibited**. Privacy/ACL degradation is never silent.
+- Specifically: smriti-down → sutra refuses indexed-content reads (no direct-read bypass). mcpjungle-down → refuse in normal sessions; per-server MCP only as `manas dev --no-gateway` emergency mode with loud banner.
 
 ### 0.6 cost-model documentation
 - Label each MCP tool cheap/medium/expensive in the per-subsystem README or a manifest.
@@ -75,6 +78,21 @@ These are decisions/changes that block or shape later phases. Cheap now, expensi
 - **E1: chitta path-resolution audit.** Of all chitta memories whose metadata mentions a path, what fraction resolves to a real file today? What fraction resolves to a smriti-indexed file? What fraction survived the last three weeks of file moves?
 - **E2: cross-tier-query frequency.** Scan `.sessions/*.jsonl` for the last month. How often did a session call into ≥2 tiers about the same subject?
 - Outputs feed the darshana decision (phase 5).
+
+### 0.8 boot contract spec (independent of full manas-cli)
+- Specify, before any manas-cli code lands: the endpoint/config the harness receives, who creates/rotates/removes it, what happens if Tool Group binding fails.
+- Acceptance test: a minimal/code session cannot reach chitta, smriti content-read, or sangha — even when the agent calls them by exact tool name.
+- This is a doc + test deliverable; the implementation is phase 1 but the contract gates it.
+
+### 0.9 `smriti_events_since` event API
+- Substrate prereq, not a kosha-side detail. Kosha, sideband path-move sync, and any future replicated consumer share this.
+- Defines: cursor monotonicity, pagination, retention window, per-event idempotency keys, replay/reconciliation when a consumer falls behind retention.
+- Lands in smriti before kosha or the sideband daemon depend on it.
+
+### 0.10 compound-tool location rule
+- Codify principle 9 explicitly: every cross-tier compound operation lives in manas-cli. Subsystem servers stay pure.
+- Concretely: yojana_context shape resolution, darshana joined views, kosha event consumers, and any future report generator are manas-cli code, not subsystem-server code.
+- mcpjungle may surface a compound tool as a single MCP tool; the implementation routes through manas-cli.
 
 ---
 
@@ -121,10 +139,11 @@ Land the chitta-side schema work from phase 0 and the things that need real impl
 Build yojana per `yojana/docs/yojana-design.md`.
 
 1. Cargo workspace at `manas/yojana/`. SQLite migrations, schema as designed.
-2. Six v0 tools.
-3. `yojana_context` ships with `summary` and `working` shapes only. `planning` and `agent` follow once dogfooded.
-4. Adopt mp-skills as the opinion layer (`/to-issues`, `/triage`, etc., pointed at yojana as the backend).
-5. Migrate manas's own todo (`docs/todo.md`) into yojana once v0 runs. Dogfood.
+2. Six v0 tools. `context_refs` uses the typed shape from phase 0.2 (no opaque strings).
+3. `yojana_context` returns the **unresolved** bundle (task fields, edges, refs). Cross-tier resolution (sutra outlines, chitta observations, ADRs on disk) lives in manas-cli per principle 9. The agent calls a manas-cli compound tool that fans out and assembles the U-shape result.
+4. `summary` and `working` shapes ship first. `planning` and `agent` follow once dogfooded.
+5. Adopt mp-skills as the opinion layer (`/to-issues`, `/triage`, etc., pointed at yojana as the backend).
+6. Migrate manas's own todo (`docs/todo.md`) into yojana once v0 runs. Dogfood.
 
 ---
 
@@ -145,8 +164,9 @@ Run E1 and E2 from phase 0.7. Then decide:
 Per `kosha/docs/architecture.md`.
 
 1. Postgres + pgvector schema (separate DB from chitta).
-2. Subscribe to smriti event stream via a new smriti tool: `smriti_events_since(cursor_id)`.
+2. Subscribe to smriti event stream via `smriti_events_since(cursor_id)` (delivered in phase 0.9).
 3. Qwen3-VL embedding pipeline. Local model. (Fastembed Rust path blocked on candle BF16 — track as kosha dependency.)
+   - **Before scaling out:** retrieval spike on the actual corpus (scanned pages, mixed scripts, tables, marginalia, text-layer PDFs). Measure ingest latency, index size, search quality, citation usefulness for image-only pages. If `kosha_read` cannot return text for a scanned page, design a concrete fallback for chitta citations before the schema hardens.
 4. Six MCP tools: `kosha_search`, `kosha_read`, `kosha_book`, `kosha_books`, `kosha_health`, `kosha_ingest`.
 5. Citation contract: `(book_id, segment_index, segment_label)`. Stored in chitta memories via `external_refs.kosha:citation`.
 

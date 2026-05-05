@@ -66,15 +66,17 @@ Stale `read`-shaped operations should default to tier 2. Stale overview operatio
 
 **Rules out:** silently returning stale content. Combining tier 1 announce + content for tools where the LLM is likely to anchor.
 
-## 9. Subsystems don't call each other directly
+## 9. Subsystems don't call each other directly; manas-cli owns all cross-tier composition
 
 Cross-tier coordination flows through one of two named seams:
 - **(a) the agent.** Default. The LLM reads from one tier, decides, calls another. Visible in transcript, costs tokens.
 - **(b) the manas-cli sideband.** When the operation is deterministic, frequent, or must not depend on LLM cooperation.
 
-Direct subsystem-to-subsystem calls (smriti calling chitta, sutra calling smriti) are out-of-policy. Compound tools that need to span tiers live in mcpjungle or the sideband, not in any subsystem's binary.
+Direct subsystem-to-subsystem calls (smriti calling chitta, sutra calling smriti) are out-of-policy. **Any compound behavior that touches more than one subsystem lives in manas-cli — never inside a subsystem server's binary.** This includes: yojana context-shape resolution (cross-joins to chitta/sutra/disk), darshana joined views, kosha event subscription against smriti, smriti→chitta path-move sync, future report generators, and any "convenience" tool that bundles results from multiple tiers. Subsystem servers stay pure: their tools answer questions about their own tier only.
 
-**Rules out:** silent IPC between subsystems. "Just this once" coupling. Calling another subsystem's DB directly.
+mcpjungle may surface a compound tool *as* a single MCP tool, but the implementation routes through manas-cli, not through a subsystem.
+
+**Rules out:** silent IPC between subsystems. "Just this once" coupling. Calling another subsystem's DB directly. A subsystem server reaching into another subsystem to "enrich" a response.
 
 ## 10. Each subsystem owns its own history
 

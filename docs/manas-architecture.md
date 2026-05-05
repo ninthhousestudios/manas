@@ -40,7 +40,7 @@ Known gaps (planned, not built):
 - Soft-delete with `invalidated_at` (handoff has this; not in migration yet).
 - Mental-model retirement (`metadata.retired_at`, `metadata.retirement_reason`).
 - `memory_contradictions` table for first-class supersession (referenced in some external reviews; **does not exist** in current schema).
-- `external_refs` typed column for joins to smriti/sutra/kosha (recommended in arch review; not yet planned).
+- `external_refs` typed column for joins to smriti/sutra/kosha — substrate gating item; shape shared with yojana `context_refs` (see § cross-tier identity).
 - Provenance/`derivations` table linking mental models to source observations (recommended; not yet planned).
 - Observation eviction/consolidation policy (not yet planned).
 
@@ -49,7 +49,7 @@ Known gaps (planned, not built):
 
 Content-addressed (BLAKE3). Allowlisted roots only. Two-tier: indexed (semantically understood, hashed, lifecycle-tracked) and cataloged (existence + size only — for build artifacts and caches). Tracks moves and renames; identity survives both. Daemon transport (Unix socket), not stdio-per-session. Privacy gate: `smriti_read` is the only content-access tool; built-in filesystem reads bypass policy and should not be used for indexed content.
 
-Owns its temporal history. Emits an event stream that other subsystems (kosha) consume.
+Owns its temporal history. Emits an event stream other subsystems (kosha, sideband) consume via `smriti_events_since(cursor_id)`. **This event API is a substrate prereq, not a kosha-side detail** — kosha, sideband path-move sync, and any future replicated consumer all share it. Required guarantees: monotonic cursor, pagination, retention window, idempotency keys per event, replay/reconciliation story for consumers that fall behind retention.
 
 ### sutra — code intelligence
 **Contract:** answer "what exists in this code, where, and how is it connected?"
@@ -82,7 +82,11 @@ Reads files only via `smriti_read` (privacy gate). Tracks its own cursor over sm
 ### yojana — task graph (design)
 **Contract:** answer "where were we, and what should I work on next?"
 
-Typed task graph: projects, tasks, edges (`depends_on`, `blocks`, `relates_to`, `supersedes`, `refines`, `motivated_by`), per-project sequence numbers (`YJN-N`). State machine borrowed from mp-skills' `triage`. **Grammar of work**, not opinions about work — opinions live in skill files. SQLite, single binary, MCP surface. Six v0 tools: `yojana_project`, `yojana_task`, `yojana_edge`, `yojana_query`, `yojana_context`, `yojana_ready`. Context shapes (summary / working / planning / agent) cross-join sutra and chitta.
+Typed task graph: projects, tasks, edges (`depends_on`, `blocks`, `relates_to`, `supersedes`, `refines`, `motivated_by`), per-project sequence numbers (`YJN-N`). State machine borrowed from mp-skills' `triage`. **Grammar of work**, not opinions about work — opinions live in skill files. SQLite, single binary, MCP surface. Six v0 tools: `yojana_project`, `yojana_task`, `yojana_edge`, `yojana_query`, `yojana_context`, `yojana_ready`.
+
+`context_refs` use the **same typed reference shape** as chitta `external_refs` (`{type, value, as_of, authority?}`) — not opaque strings. Yojana stores them; it does not resolve them.
+
+**Where context-shape resolution lives:** `yojana_context` returns the *unresolved bundle* (task fields, edges, ref list) from yojana itself. Cross-joins to sutra outlines, chitta observations, ADRs on disk, etc. happen in **manas-cli** (per principle 9). The agent calls a single compound tool that manas-cli surfaces; manas-cli internally fans out to yojana → sutra → chitta → disk and assembles the U-shape result. Yojana's binary stays a pure task-graph server.
 
 ### mcpjungle — gateway
 **Contract:** present a single MCP endpoint that fronts every other subsystem and enforces who can call what.
@@ -96,13 +100,21 @@ Go binary. Provides:
 Known gaps to work around: no resource templates (smriti uses tool-based reads — already designed this way), no resource subscriptions (handled via manas-cli sideband), Tool Groups are tools-only (resources not group-scoped — accepted).
 
 ### manas-cli — ops surface (planned)
-**Contract:** the human-and-harness-facing CLI that boots sessions, runs lifecycle skills, and hosts the sideband daemon.
+**Contract:** the human-and-harness-facing CLI that boots sessions, runs lifecycle skills, hosts the sideband daemon, **and owns every cross-tier compound operation** (per principle 9).
 
 Responsibilities:
 1. **Boot** — claim/inject the right Tool Group binding, seed the system prompt, hand off to the LLM harness (Claude Code, Gemini CLI, opencode, or eventually local).
 2. **Skill shells** — claim sangha locks, inject transcript paths, execute LLM body, release locks, write outputs. The Rust shell of two-layer skills (see below).
 3. **Sideband daemon** — narrow IPC for cross-subsystem coordination that must not depend on LLM cooperation (smriti→chitta path-move sync, kosha event subscription, etc.).
-4. **Health + observability** — `manas health`, `manas warm`, `manas done`, `manas reflect`.
+4. **Compound tool host** — implements every cross-tier read/write that bundles more than one subsystem: yojana context-shape resolution, darshana joined views, future report generators. Subsystem servers never call each other; manas-cli is the only place that fans out across tiers.
+5. **Health + observability** — `manas health`, `manas warm`, `manas done`, `manas reflect`.
+
+The boot contract (must be specified before anything else in manas-cli ships):
+- Which endpoint/config the harness receives, who creates it, who rotates/removes it, and what happens if binding fails.
+- Fallback to per-server MCP is an **emergency-only mode**, never a normal degraded path — it removes the ACL.
+- An integration test that a minimal/code session cannot reach chitta, smriti content-read, or sangha even when the agent calls them by exact tool name.
+
+These four points are the boot contract; they can be specified and tested independently of the rest of manas-cli landing.
 
 ---
 
@@ -188,10 +200,20 @@ The bridges that exist or are planned:
 | smriti ↔ kosha | BLAKE3 content_hash | Strong — kosha derives book_id from hash |
 | smriti ↔ sutra | path | Strong — both use canonical paths |
 | chitta ↔ sutra | path/symbol via JSONB | Weak — string-match |
-| chitta ↔ yojana | `chitta:<uuid>` in `context_refs` | Strong (planned) |
+| chitta ↔ yojana | typed ref `{type:"chitta:memory", value:<uuid>, as_of}` in yojana `context_refs` | Strong (planned) |
 | chitta ↔ kosha | `(book_id, segment_index, label)` triple stored as citation | Strong (planned) |
 
-The weak bridges are a real architectural problem. The arch review (2026-05-03) recommends a typed `external_refs` column on chitta memories with values like `{type: "smriti:hash", value: "...", as_of: ...}` and `{type: "sutra:symbol", value: "path::sym", as_of: ...}`. This lands before any binding/view layer (darshana). Without it, cross-tier queries are JSONB grep-with-extra-steps.
+The weak bridges are a real architectural problem. The fix is one **shared typed-ref shape** used by both chitta `external_refs` and yojana `context_refs`:
+
+```
+{type: "smriti:hash" | "smriti:path" | "sutra:symbol" | "kosha:citation"
+     | "yojana:task" | "chitta:memory" | "doc:path",
+ value: "<id-or-path>",
+ as_of: <unix_ms>,
+ authority?: "<source-tier>"}
+```
+
+Both subsystems store the same shape (storage may differ — chitta as a typed JSONB column, yojana as a JSONB array on tasks). Path refs are second-class: prefer `smriti:hash` or `sutra:symbol` when available. This lands before any binding/view layer (darshana) and before yojana ships its `context_refs` schema. Without it, cross-tier queries are JSONB grep-with-extra-steps and yojana/chitta inherit a translation layer.
 
 ---
 
@@ -230,22 +252,27 @@ When tier 2 is in effect, the response should send the staleness signal *instead
 
 ## failure semantics
 
-What happens when X is down or contended:
+What happens when X is down or contended. Each fallback is classified:
 
-| Failing component | Caller | Behavior |
-|---|---|---|
-| chitta down | `/done` | Skip session_summary write. Still write handoff. Log the gap. |
-| chitta down | `/reflect` | Abort. Cannot read observations. Surface to user. |
-| chitta down | normal session | Continue without memory; warn at session start. |
-| smriti down | sutra `read` of indexed file | Fall back to direct read with `is_stale: unknown`. |
-| smriti down | kosha ingestion | Pause cursor; resume on smriti recovery. |
-| smriti scan in-flight | sutra `read` of recently-moved file | Sutra returns its as-of-now answer with `is_stale: true`; sideband sync resolves on next tick. |
-| sangha down | `/done` | Best-effort: write handoff without lock. Warn user about possible concurrent-write race. |
-| sangha lock TTL expired mid-`/reflect` | `/reflect` | Re-claim with a fresh idempotency check; if state shows another writer, abort. |
-| manas-cli sideband down | smriti path-move | Event queues in smriti; chitta updates lag until sideband recovers. |
-| mcpjungle down | everything | Fall back to per-server MCP config (degraded; no ACL). Operationally undesirable; alert. |
+- **secure-degraded** — reduced functionality, hard contracts intact.
+- **insecure-emergency** — operator-acknowledged temporary mode that drops a hard contract; loud warning required; never a silent fallback.
+- **prohibited** — refuse the operation; do not bypass the gate.
 
-This table is incomplete. It should grow as new failure modes are observed.
+| Failing component | Caller | Behavior | Class |
+|---|---|---|---|
+| chitta down | `/done` | Skip session_summary write. Still write handoff. Log the gap. | secure-degraded |
+| chitta down | `/reflect` | Abort. Cannot read observations. Surface to user. | secure-degraded |
+| chitta down | normal session | Continue without memory; warn at session start. | secure-degraded |
+| smriti down | sutra `read` of indexed file | **Refuse.** Direct-read bypass would skip the privacy gate. Return tier-2 error pointing at `manas health`. | prohibited |
+| smriti down | kosha ingestion | Pause cursor; resume on smriti recovery. | secure-degraded |
+| smriti scan in-flight | sutra `read` of recently-moved file | Sutra returns its as-of-now answer with `is_stale: true`; sideband sync resolves on next tick. | secure-degraded |
+| sangha down | `/done` | Best-effort: write handoff without lock. Warn user about possible concurrent-write race. | secure-degraded |
+| sangha lock TTL expired mid-`/reflect` | `/reflect` | Re-claim with a fresh idempotency check; if state shows another writer, abort. | secure-degraded |
+| manas-cli sideband down | smriti path-move | Event queues in smriti; chitta updates lag until sideband recovers. | secure-degraded |
+| mcpjungle down | normal session | **Refuse.** Per-server MCP fallback removes Tool Group ACL — minimal/rich boot is no longer enforceable. | prohibited |
+| mcpjungle down | operator running `manas dev --no-gateway` | Per-server MCP config, banner warns that ACL is off, every tool call logs the bypass. | insecure-emergency |
+
+This table is incomplete. It should grow as new failure modes are observed. New entries must declare a class; "fall back transparently" is not an option for anything that holds a hard contract.
 
 ---
 
@@ -332,7 +359,7 @@ These extend the chitta principles in `chitta/docs/principles.md` and apply syst
 ## open questions
 
 - **Soft-delete in chitta.** Wire `invalidated_at` (planned in handoffs) into next migration and update `delete_memory` accordingly.
-- **External refs schema.** Typed `external_refs` JSONB column on chitta memories with `(type, value, as_of)`. Lands before darshana.
+- **External refs schema.** Typed `external_refs` JSONB column on chitta memories — shape shared with yojana `context_refs` (see § cross-tier identity). Substrate gating item; lands before yojana ships and before darshana.
 - **Mental-model retirement.** `metadata.retired_at` + `retirement_reason`. `search_memories` excludes retired by default.
 - **Provenance/derivations.** Track which observations a mental model was synthesized from, in which session, with which prompt.
 - **Observation eviction.** What happens to observations consolidated into a mental model? To old un-consolidated observations? At what density does summarization kick in?

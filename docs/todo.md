@@ -9,14 +9,22 @@ Format: `[ ]` open, `[~]` in progress, `[x]` done, `[-]` dropped. Each item: pri
 
 ---
 
-## P0 — architectural prereqs (do first)
+## P0 — substrate hardening (gating set, do first)
+
+These five items are the gating set: until they're real, downstream phases (yojana, kosha, darshana, /reflect-as-model-factory) risk encoding today's gaps as tomorrow's APIs.
+
+- [ ] **Unified typed-ref shape.** One shape `{type, value, as_of, authority?}` shared by chitta `external_refs` and yojana `context_refs`. Spec the shape, then ship chitta migration `0007_external_refs.sql`; yojana ships using the same shape (no opaque strings). → `docs/manas-architecture.md` (done); `chitta/migrations/0007_*`; `yojana/docs/yojana-design.md`.
+- [ ] **Per-operation freshness response tier table + tier-2 enforcement.** Tier 1/2/3 specified per tool. **Implement tier-2 refusal first for `sutra_read` and `smriti_read`** — stale content withheld, not returned-with-flag. → `manas-cli/docs/freshness-envelopes.md` rewrite; `sutra/src/tools/read.rs`; `smriti/src/tools/read.rs`.
+- [ ] **`smriti_events_since` event API.** Cursor monotonicity, pagination, retention window, per-event idempotency keys, replay-after-pruning. Substrate, not kosha-side. → `smriti/src/tools/events.rs` (new); `smriti/docs/architecture.md`.
+- [~] **Boot contract spec.** Endpoint/config shape, who creates/rotates, failure mode. Acceptance test: minimal session can't reach chitta/smriti-content/sangha by exact tool name. Doc + test before manas-cli implementation. → `manas-cli/docs/boot-contract.md` (draft v0 landed 2026-05-04; OQ-1 mcpjungle per-client Tool Group binding to verify; test fixtures pending).
+- [ ] **Failure-semantics reclassification.** Each fallback labeled secure-degraded / insecure-emergency / prohibited. smriti-down → sutra refuses indexed reads (no direct-read bypass). mcpjungle-down → refuse normal sessions; per-server MCP only as `manas dev --no-gateway` emergency. → `docs/manas-architecture.md` (done).
+
+## P0 — adjacent prereqs (do alongside the gating set)
 
 - [ ] **Resolve principle 10.** Drop "CC-first" + the disagreement annotation. Adopt two-layer harness-agnostic skills as the path forward. → `docs/principles.md` (done in this rewrite); `docs/roadmap.md` (done).
-- [ ] **chitta `external_refs` migration.** Typed JSONB column `[{type, value, as_of}]` with allowlist. Without this, cross-tier joins are JSONB grep. → `chitta/migrations/0007_external_refs.sql`.
-- [ ] **chitta soft-delete + retirement.** `invalidated_at` column + `metadata.retired_at` + `metadata.retirement_reason`. `delete_memory` becomes soft. `search_memories` excludes retired by default. → `chitta/migrations/0008_*`.
-- [ ] **Per-operation freshness response tier table.** Tier 1/2/3 specified per tool. Stale `read` ops withhold content. → `manas-cli/docs/freshness-envelopes.md` rewrite.
-- [ ] **Failure-semantics table.** Codify the cross-subsystem failure-handling table from the arch doc; subsystem owners review. → `docs/manas-architecture.md` (started; expand).
-- [ ] **Cost-model labels.** Cheap/medium/expensive per MCP tool, in each subsystem's docs. Documentation only for now. → per-subsystem README + manifest.
+- [ ] **chitta soft-delete + retirement.** `invalidated_at` column + `metadata.retired_at` + `metadata.retirement_reason`. `delete_memory` becomes soft. `search_memories` excludes retired by default. **Lands before `/reflect` runs as a durable model factory.** → `chitta/migrations/0008_*`.
+- [ ] **Compound-tool location rule.** Codify in principles + roadmap: every cross-tier compound op lives in manas-cli, never in a subsystem server. → `docs/principles.md` (done); `docs/roadmap.md` (done).
+- [ ] **Cost-model labels.** Cheap/medium/expensive per MCP tool, in each subsystem's docs. Documentation only for now; instrumentation deferred. → per-subsystem README + manifest.
 
 ## P0 — experiments (do before darshana)
 
@@ -56,8 +64,9 @@ Format: `[ ]` open, `[~]` in progress, `[x]` done, `[-]` dropped. Each item: pri
 
 ## P2 — kosha v0
 
-- [ ] **Smriti event-stream tool.** `smriti_events_since(cursor_id)` over the existing events table. → `smriti/src/tools/events.rs` (new).
-- [ ] **Kosha scaffold + Postgres schema.** Per `kosha/docs/architecture.md`. → `kosha/`.
+- [-] **Smriti event-stream tool.** Moved to P0 substrate (see gating set). → `smriti/src/tools/events.rs`.
+- [ ] **Kosha retrieval spike.** Before schema hardening: small benchmark on actual corpus (scanned pages, mixed scripts, tables, text-layer PDFs). Measure ingest latency, index size, search quality, citation usefulness for image-only pages. → `kosha/docs/spike-results.md`.
+- [ ] **Kosha scaffold + Postgres schema.** After spike validates Qwen3-VL/no-OCR bet. Per `kosha/docs/architecture.md`. → `kosha/`.
 - [ ] **Qwen3-VL pipeline.** Local model. Track candle BF16 dependency. → `kosha/src/embedding.rs`.
 - [ ] **Six MCP tools.** `kosha_search`, `kosha_read`, `kosha_book`, `kosha_books`, `kosha_health`, `kosha_ingest`.
 
