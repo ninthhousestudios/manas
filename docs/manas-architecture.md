@@ -265,6 +265,7 @@ What happens when X is down or contended. Each fallback is classified:
 | chitta down | normal session | Continue without memory; warn at session start. | secure-degraded |
 | smriti down | sutra `read` of indexed file | **Refuse.** Direct-read bypass would skip the privacy gate. Return tier-2 error pointing at `manas health`. | prohibited |
 | smriti down | kosha ingestion | Pause cursor; resume on smriti recovery. | secure-degraded |
+| sutra index stale | sutra `read` | **Refuse content.** Return symbol metadata + `next_action: "Run sutra_parse"`. Prevents model anchoring on outdated code. | prohibited |
 | smriti scan in-flight | sutra `read` of recently-moved file | Sutra returns its as-of-now answer with `is_stale: true`; sideband sync resolves on next tick. | secure-degraded |
 | sangha down | `/done` | Best-effort: write handoff without lock. Warn user about possible concurrent-write race. | secure-degraded |
 | sangha lock TTL expired mid-`/reflect` | `/reflect` | Re-claim with a fresh idempotency check; if state shows another writer, abort. | secure-degraded |
