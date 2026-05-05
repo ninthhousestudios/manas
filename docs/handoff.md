@@ -1,55 +1,26 @@
 # manas — handoff
 
 Date: 2026-05-05
-Session intent: scaffold manas-cli, implement adapter trait and skill-shell library.
-Prior handoff archived to `.handoffs/2026-05-05T08-19-07.md`.
+Session intent: port /done to two-layer skill-shell (manas-harness/7)
 
 ---
 
-## the headline
+## what to pick up
 
-manas-cli is scaffolded and has its first real code: adapter trait, Claude Code adapter, and skill-shell library. Three phase-1 tasks completed (/4, /5, /6). **Next step is /7 — port /done to two-layer**, which validates the whole adapter + skill-shell chain end-to-end.
+1. **Sangha systemd service** — crash-looping with `ConnectionClosed("initialize request")`. The unit runs `sangha serve` (stdio mode) but something is trying to connect to it externally. Either fix the service to use `--http` or investigate what's connecting. Low priority — CC uses stdio MCP directly.
 
-## what shipped this session
+2. **mcpjungle Tool Group routing** — sub-sessions spawned by `manas done` only see mcpjungle. Chitta, sangha, sutra etc. need to be routable through mcpjungle's Tool Group binding so sub-agents can use them.
 
-- `manas-cli/` — standalone git repo, 3 commits, edition 2024
-- Five subcommand stubs (health, warm, done, reflect, status)
-- `HarnessAdapter` trait + `ClaudeCodeAdapter` (writes per-session MCP config, spawns `claude --strict-mcp-config`)
-- `Binding` struct materializing boot-contract §3 (env vars, Tool Group endpoint)
-- `SkillShell::run()` — claim lock → launch body → release lock (finally-pattern)
-- `LockClient` trait with `SanghaLockClient` (HTTP/MCP) + `MockLockClient`
-- `docs/admin-cred.md` — token storage design (env var → file, dev-mode detection)
-- 7 tests (4 integration, 3 unit)
+3. **Next tasks (manas-harness):**
+   - /8 Gemini CLI adapter
+   - /9 Codex CLI adapter
+   - /11 Sideband daemon (minimal)
+   - /12 Boot contract acceptance test
 
-## what to pick up next session — in order
+4. **Smoke test artifact** — `.handoffs/2026-05-05T04-41-56.md` is untracked (created by the live smoke test sub-agent). Can delete or commit.
 
-The yojana project `manas-harness` is the source of truth. Concrete next moves:
+## context
 
-1. **/7 port /done to two-layer** — now unblocked (needs /5 + /6, both done). Wire the `manas done` command to: claim `handoff` lock via SkillShell, launch CC with the /done prompt body, capture output, write `docs/handoff.md`, release lock. This is the first real end-to-end validation.
-
-2. **/8 Gemini CLI adapter** — mechanical port of ClaudeCodeAdapter. Writes `.gemini/settings.json`, sets `GEMINI_CLI_TRUST_WORKSPACE=true`, uses `--allowed-mcp-server-names`.
-
-3. **/9 Codex CLI adapter** — writes `config.toml` under `CODEX_HOME`, uses `bearer_token_env_var` for token (never written to disk).
-
-4. **/11 sideband daemon (minimal)** — independent of adapter chain, depends only on /4. Unix socket, `path-move-notify` endpoint.
-
-5. **/12 boot contract acceptance test** — needs live mcpjungle. The fixture-harness test from boot-contract.md §6.
-
-## cleanup needed
-
-- Parent `manas/` repo still tracks some `manas-cli/docs/` files (archive/, freshness-envelopes.md, etc.) that now live in the manas-cli repo. Should be `git rm` from parent.
-
-## pointers
-
-### canonical
-- `docs/manas-architecture.md` — current state, contracts, interaction rules.
-- `docs/roadmap.md` — phases, what's done, what's next.
-- `docs/principles.md` — 12 cross-cutting principles.
-
-### this session's artifacts
-- `manas-cli/` — the new repo (3 commits on main)
-- `manas-cli/docs/admin-cred.md` — admin credential design
-- `manas-cli/src/adapter/` — trait + CC impl
-- `manas-cli/src/skill/` — shell + lock client
-- `manas-cli/src/binding.rs` — boot-contract §3 binding struct
-- yojana: manas-harness/4, /5, /6 all marked done
+- Sangha HTTP listens on port 3200 (not 4100 as manas-cli config defaults). Config default may need updating, or use env override `MANAS_SANGHA_URL=http://127.0.0.1:3200`.
+- All manas-harness tasks /1-/7 are now `done` in yojana. Tasks /8+ are `needs-triage`.
+- The `panda` commit message workaround (printf to file, git commit -F) works reliably.
