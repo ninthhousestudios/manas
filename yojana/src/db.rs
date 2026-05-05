@@ -1,0 +1,1918 @@
+use parking_lot::Mutex;
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::config::Config;
+use crate::error::YojanaError;
+use crate::state;
+
+pub struct Db {
+    conn: Mutex<Connection>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub ts: i64,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+// --- Project types ---
+
+#[derive(Debug)]
+pub struct ProjectRow {
+    pub id: Uuid,
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub history: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Default)]
+pub struct ProjectUpdates {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+}
+
+// --- Task types ---
+
+#[derive(Debug)]
+pub struct TaskRow {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub project_slug: String,
+    pub sequence_number: i64,
+    pub title: String,
+    pub description: String,
+    pub category: Option<String>,
+    pub status: String,
+    pub slice_type: Option<String>,
+    pub acceptance_criteria: String,
+    pub decisions: String,
+    pub implementation_plan: Option<String>,
+    pub execution_record: Option<String>,
+    pub reproduction: Option<String>,
+    pub root_cause: Option<String>,
+    pub context_refs: String,
+    pub files: String,
+    pub tags: String,
+    pub history: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct CreateTaskParams {
+    pub project_id: Uuid,
+    pub project_slug: String,
+    pub title: String,
+    pub description: String,
+    pub category: Option<String>,
+    pub slice_type: Option<String>,
+    pub acceptance_criteria: String,
+    pub decisions: String,
+    pub context_refs: String,
+    pub files: String,
+    pub tags: String,
+    pub implementation_plan: Option<String>,
+    pub execution_record: Option<String>,
+    pub reproduction: Option<String>,
+    pub root_cause: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct TaskUpdates {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub category: Option<Option<String>>,
+    pub status: Option<String>,
+    pub slice_type: Option<Option<String>>,
+    pub acceptance_criteria: Option<String>,
+    pub decisions: Option<String>,
+    pub implementation_plan: Option<Option<String>>,
+    pub execution_record: Option<Option<String>>,
+    pub reproduction: Option<Option<String>>,
+    pub root_cause: Option<Option<String>>,
+    pub context_refs: Option<String>,
+    pub files: Option<String>,
+    pub tags: Option<String>,
+}
+
+enum TaskIdentifier {
+    Uuid(Uuid),
+    SlugSeq(String, i64),
+}
+
+pub const DEFAULT_PAGE_LIMIT: i64 = 100;
+
+#[derive(Debug, Default)]
+pub struct TaskQueryFilter {
+    pub project_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub category: Option<String>,
+    pub slice_type: Option<String>,
+    pub tag: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+// --- Project statuses ---
+
+const VALID_PROJECT_STATUSES: &[&str] = &["active", "paused", "archived"];
+
+// --- Edge types ---
+
+pub const VALID_EDGE_TYPES: &[&str] =
+    &["depends_on", "relates_to", "supersedes", "refines", "motivated_by"];
+
+#[derive(Debug)]
+pub struct EdgeRow {
+    pub id: Uuid,
+    pub source_task_id: Uuid,
+    pub target_task_id: Uuid,
+    pub edge_type: String,
+    pub note: Option<String>,
+    pub created_at: i64,
+}
+
+// --- Project helpers ---
+
+fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
+    let id_bytes: Vec<u8> = row.get("id")?;
+    let id = Uuid::from_slice(&id_bytes).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
+    })?;
+    Ok(ProjectRow {
+        id,
+        slug: row.get("slug")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        status: row.get("status")?,
+        history: row.get("history")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn get_by_id(conn: &Connection, id: &Uuid) -> Result<Option<ProjectRow>, YojanaError> {
+    let mut stmt = conn.prepare("SELECT * FROM projects WHERE id = ?1")?;
+    let row = stmt
+        .query_row(rusqlite::params![id.as_bytes().as_slice()], map_project_row)
+        .optional()?;
+    Ok(row)
+}
+
+fn get_by_slug(conn: &Connection, slug: &str) -> Result<Option<ProjectRow>, YojanaError> {
+    let mut stmt = conn.prepare("SELECT * FROM projects WHERE slug = ?1")?;
+    let row = stmt
+        .query_row(rusqlite::params![slug], map_project_row)
+        .optional()?;
+    Ok(row)
+}
+
+fn resolve_project(
+    conn: &Connection,
+    id: Option<&str>,
+    slug: Option<&str>,
+) -> Result<ProjectRow, YojanaError> {
+    if let Some(id_str) = id {
+        let uuid = Uuid::parse_str(id_str)
+            .map_err(|_| YojanaError::InvalidInput(format!("invalid UUID: {id_str}")))?;
+        return get_by_id(conn, &uuid)?
+            .ok_or_else(|| YojanaError::NotFound(format!("project id '{id_str}'")));
+    }
+    if let Some(slug) = slug {
+        return get_by_slug(conn, slug)?
+            .ok_or_else(|| YojanaError::NotFound(format!("project slug '{slug}'")));
+    }
+    Err(YojanaError::InvalidInput("id or slug required".into()))
+}
+
+// --- Task helpers ---
+
+const TASK_SELECT: &str = "\
+    SELECT t.id, t.project_id, p.slug AS project_slug, t.sequence_number, \
+    t.title, t.description, t.category, t.status, t.slice_type, \
+    t.acceptance_criteria, t.decisions, t.implementation_plan, \
+    t.execution_record, t.reproduction, t.root_cause, \
+    t.context_refs, t.files, t.tags, t.history, t.created_at, t.updated_at \
+    FROM tasks t JOIN projects p ON t.project_id = p.id";
+
+fn uuid_from_blob(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<Uuid> {
+    let bytes: Vec<u8> = row.get(col)?;
+    Uuid::from_slice(&bytes).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
+    })
+}
+
+fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        id: uuid_from_blob(row, "id")?,
+        project_id: uuid_from_blob(row, "project_id")?,
+        project_slug: row.get("project_slug")?,
+        sequence_number: row.get("sequence_number")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        category: row.get("category")?,
+        status: row.get("status")?,
+        slice_type: row.get("slice_type")?,
+        acceptance_criteria: row.get("acceptance_criteria")?,
+        decisions: row.get("decisions")?,
+        implementation_plan: row.get("implementation_plan")?,
+        execution_record: row.get("execution_record")?,
+        reproduction: row.get("reproduction")?,
+        root_cause: row.get("root_cause")?,
+        context_refs: row.get("context_refs")?,
+        files: row.get("files")?,
+        tags: row.get("tags")?,
+        history: row.get("history")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn get_task_by_uuid(conn: &Connection, id: &Uuid) -> Result<Option<TaskRow>, YojanaError> {
+    let sql = format!("{TASK_SELECT} WHERE t.id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let row = stmt
+        .query_row(rusqlite::params![id.as_bytes().as_slice()], map_task_row)
+        .optional()?;
+    Ok(row)
+}
+
+fn get_task_by_slug_seq(
+    conn: &Connection,
+    slug: &str,
+    seq: i64,
+) -> Result<Option<TaskRow>, YojanaError> {
+    let sql = format!("{TASK_SELECT} WHERE p.slug = ?1 AND t.sequence_number = ?2");
+    let mut stmt = conn.prepare(&sql)?;
+    let row = stmt
+        .query_row(rusqlite::params![slug, seq], map_task_row)
+        .optional()?;
+    Ok(row)
+}
+
+fn parse_task_identifier(s: &str) -> Result<TaskIdentifier, YojanaError> {
+    if let Ok(uuid) = Uuid::parse_str(s) {
+        return Ok(TaskIdentifier::Uuid(uuid));
+    }
+    if let Some((slug, num_str)) = s.rsplit_once('/') {
+        if let Ok(num) = num_str.parse::<i64>() {
+            return Ok(TaskIdentifier::SlugSeq(slug.to_string(), num));
+        }
+    }
+    Err(YojanaError::InvalidInput(format!(
+        "invalid task identifier '{s}'; expected UUID or 'project-slug/N'"
+    )))
+}
+
+fn next_sequence_number(conn: &Connection, project_id: &Uuid) -> Result<i64, YojanaError> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM tasks WHERE project_id = ?1",
+    )?;
+    let seq: i64 = stmt.query_row(
+        rusqlite::params![project_id.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    Ok(seq)
+}
+
+fn resolve_task(conn: &Connection, identifier: &str) -> Result<TaskRow, YojanaError> {
+    let row = match parse_task_identifier(identifier)? {
+        TaskIdentifier::Uuid(id) => get_task_by_uuid(conn, &id)?,
+        TaskIdentifier::SlugSeq(slug, seq) => get_task_by_slug_seq(conn, &slug, seq)?,
+    };
+    row.ok_or_else(|| YojanaError::NotFound(format!("task '{identifier}'")))
+}
+
+use rusqlite::OptionalExtension;
+
+impl Db {
+    pub fn open(config: &Config) -> anyhow::Result<Self> {
+        if let Some(parent) = config.db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(&config.db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
+        db.run_migrations()?;
+        Ok(db)
+    }
+
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
+        db.run_migrations()?;
+        Ok(db)
+    }
+
+    fn run_migrations(&self) -> Result<(), rusqlite::Error> {
+        const MIGRATIONS: &[(&str, &str)] = &[
+            ("0001_initial", include_str!("../migrations/0001_initial.sql")),
+            ("0002_tasks", include_str!("../migrations/0002_tasks.sql")),
+            ("0003_edges", include_str!("../migrations/0003_edges.sql")),
+            ("0004_conversations", include_str!("../migrations/0004_conversations.sql")),
+            ("0005_in_progress_rename", include_str!("../migrations/0005_in-progress-rename.sql")),
+        ];
+
+        let conn = self.conn.lock();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _yojana_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            )",
+        )?;
+
+        for (name, sql) in MIGRATIONS {
+            let already_applied: bool = conn
+                .prepare("SELECT 1 FROM _yojana_migrations WHERE name = ?1")?
+                .query_row(rusqlite::params![name], |_| Ok(true))
+                .optional()?
+                .unwrap_or(false);
+
+            if !already_applied {
+                conn.execute_batch(sql)?;
+                conn.execute(
+                    "INSERT INTO _yojana_migrations (name, applied_at) VALUES (?1, ?2)",
+                    rusqlite::params![name, chrono::Utc::now().timestamp_millis()],
+                )?;
+                tracing::info!("applied migration: {name}");
+            }
+        }
+        Ok(())
+    }
+
+    // --- Project methods ---
+
+    pub fn create_project(
+        &self,
+        slug: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<ProjectRow, YojanaError> {
+        let conn = self.conn.lock();
+        let id = Uuid::now_v7();
+        let now = chrono::Utc::now().timestamp_millis();
+        let history = serde_json::to_string(&vec![HistoryEntry {
+            ts: now,
+            kind: "project_created".into(),
+            payload: serde_json::json!({}),
+        }])?;
+
+        conn.execute(
+            "INSERT INTO projects (id, slug, title, description, status, history, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?6)",
+            rusqlite::params![id.as_bytes().as_slice(), slug, title, description, history, now],
+        )
+        .map_err(|e| {
+            if let rusqlite::Error::SqliteFailure(ref err, _) = e {
+                if err.extended_code == 2067 {
+                    return YojanaError::Conflict(format!(
+                        "project slug '{slug}' already exists"
+                    ));
+                }
+            }
+            YojanaError::Db(e)
+        })?;
+
+        get_by_id(&conn, &id)?.ok_or_else(|| YojanaError::NotFound("just-created project".into()))
+    }
+
+    pub fn get_project(
+        &self,
+        id: Option<&str>,
+        slug: Option<&str>,
+    ) -> Result<Option<ProjectRow>, YojanaError> {
+        let conn = self.conn.lock();
+        if let Some(id_str) = id {
+            let uuid = Uuid::parse_str(id_str)
+                .map_err(|_| YojanaError::InvalidInput(format!("invalid UUID: {id_str}")))?;
+            return get_by_id(&conn, &uuid);
+        }
+        if let Some(slug) = slug {
+            return get_by_slug(&conn, slug);
+        }
+        Err(YojanaError::InvalidInput("id or slug required".into()))
+    }
+
+    pub fn list_projects(
+        &self,
+        status: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<ProjectRow>, YojanaError> {
+        let conn = self.conn.lock();
+        let lim = limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+        let off = offset.unwrap_or(0);
+        let rows = if let Some(status) = status {
+            let mut stmt = conn.prepare(
+                "SELECT * FROM projects WHERE status = ?1 ORDER BY created_at LIMIT ?2 OFFSET ?3",
+            )?;
+            stmt.query_map(rusqlite::params![status, lim, off], map_project_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt =
+                conn.prepare("SELECT * FROM projects ORDER BY created_at LIMIT ?1 OFFSET ?2")?;
+            stmt.query_map(rusqlite::params![lim, off], map_project_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
+    }
+
+    pub fn update_project(
+        &self,
+        id: Option<&str>,
+        slug: Option<&str>,
+        updates: ProjectUpdates,
+    ) -> Result<ProjectRow, YojanaError> {
+        let conn = self.conn.lock();
+        let project = resolve_project(&conn, id, slug)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut history: Vec<HistoryEntry> = serde_json::from_str(&project.history)?;
+
+        if let Some(ref new_title) = updates.title {
+            if new_title != &project.title {
+                history.push(HistoryEntry {
+                    ts: now,
+                    kind: "updated".into(),
+                    payload: serde_json::json!({"field": "title", "from": project.title, "to": new_title}),
+                });
+            }
+        }
+        if let Some(ref new_desc) = updates.description {
+            if new_desc != &project.description {
+                history.push(HistoryEntry {
+                    ts: now,
+                    kind: "updated".into(),
+                    payload: serde_json::json!({"field": "description"}),
+                });
+            }
+        }
+        if let Some(ref new_status) = updates.status {
+            if !VALID_PROJECT_STATUSES.contains(&new_status.as_str()) {
+                return Err(YojanaError::InvalidInput(format!(
+                    "invalid project status '{new_status}'; valid: {}",
+                    VALID_PROJECT_STATUSES.join(", ")
+                )));
+            }
+            if new_status != &project.status {
+                history.push(HistoryEntry {
+                    ts: now,
+                    kind: "status_changed".into(),
+                    payload: serde_json::json!({"from": project.status, "to": new_status}),
+                });
+            }
+        }
+
+        let new_title = updates.title.as_deref().unwrap_or(&project.title);
+        let new_desc = updates.description.as_deref().unwrap_or(&project.description);
+        let new_status = updates.status.as_deref().unwrap_or(&project.status);
+        let history_json = serde_json::to_string(&history)?;
+
+        conn.execute(
+            "UPDATE projects SET title=?1, description=?2, status=?3, history=?4, updated_at=?5 WHERE id=?6",
+            rusqlite::params![new_title, new_desc, new_status, history_json, now, project.id.as_bytes().as_slice()],
+        )?;
+
+        get_by_id(&conn, &project.id)?
+            .ok_or_else(|| YojanaError::NotFound("updated project".into()))
+    }
+
+    // --- Task methods ---
+
+    pub fn create_task(&self, params: CreateTaskParams) -> Result<TaskRow, YojanaError> {
+        let conn = self.conn.lock();
+        let id = Uuid::now_v7();
+        let now = chrono::Utc::now().timestamp_millis();
+        let seq = next_sequence_number(&conn, &params.project_id)?;
+        let history = serde_json::to_string(&vec![HistoryEntry {
+            ts: now,
+            kind: "task_created".into(),
+            payload: serde_json::json!({"sequence_number": seq, "project": params.project_slug}),
+        }])?;
+
+        conn.execute(
+            "INSERT INTO tasks (\
+                id, project_id, sequence_number, title, description, \
+                category, status, slice_type, acceptance_criteria, decisions, \
+                implementation_plan, execution_record, reproduction, root_cause, \
+                context_refs, files, tags, history, created_at, updated_at\
+            ) VALUES (\
+                ?1, ?2, ?3, ?4, ?5, \
+                ?6, 'needs-triage', ?7, ?8, ?9, \
+                ?10, ?11, ?12, ?13, \
+                ?14, ?15, ?16, ?17, ?18, ?18\
+            )",
+            rusqlite::params![
+                id.as_bytes().as_slice(),
+                params.project_id.as_bytes().as_slice(),
+                seq,
+                params.title,
+                params.description,
+                params.category,
+                params.slice_type,
+                params.acceptance_criteria,
+                params.decisions,
+                params.implementation_plan,
+                params.execution_record,
+                params.reproduction,
+                params.root_cause,
+                params.context_refs,
+                params.files,
+                params.tags,
+                history,
+                now,
+            ],
+        )?;
+
+        get_task_by_uuid(&conn, &id)?
+            .ok_or_else(|| YojanaError::NotFound("just-created task".into()))
+    }
+
+    pub fn get_task(&self, identifier: &str) -> Result<Option<TaskRow>, YojanaError> {
+        let conn = self.conn.lock();
+        match parse_task_identifier(identifier)? {
+            TaskIdentifier::Uuid(id) => get_task_by_uuid(&conn, &id),
+            TaskIdentifier::SlugSeq(slug, seq) => get_task_by_slug_seq(&conn, &slug, seq),
+        }
+    }
+
+    pub fn update_task(
+        &self,
+        identifier: &str,
+        updates: TaskUpdates,
+    ) -> Result<TaskRow, YojanaError> {
+        let conn = self.conn.lock();
+        let task = resolve_task(&conn, identifier)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut history: Vec<HistoryEntry> = serde_json::from_str(&task.history)?;
+
+        if let Some(ref new_status) = updates.status {
+            if new_status != &task.status {
+                state::validate_transition(&task.status, new_status)?;
+                history.push(HistoryEntry {
+                    ts: now,
+                    kind: "status_changed".into(),
+                    payload: serde_json::json!({"from": task.status, "to": new_status}),
+                });
+            }
+        }
+        if let Some(ref new_title) = updates.title {
+            if new_title != &task.title {
+                history.push(HistoryEntry {
+                    ts: now,
+                    kind: "updated".into(),
+                    payload: serde_json::json!({"field": "title", "from": task.title, "to": new_title}),
+                });
+            }
+        }
+
+        let new_title = updates.title.as_deref().unwrap_or(&task.title);
+        let new_desc = updates.description.as_deref().unwrap_or(&task.description);
+        let new_cat: Option<&str> = match &updates.category {
+            None => task.category.as_deref(),
+            Some(inner) => inner.as_deref(),
+        };
+        let new_status = updates.status.as_deref().unwrap_or(&task.status);
+        let new_slice: Option<&str> = match &updates.slice_type {
+            None => task.slice_type.as_deref(),
+            Some(inner) => inner.as_deref(),
+        };
+        let new_ac = updates
+            .acceptance_criteria
+            .as_deref()
+            .unwrap_or(&task.acceptance_criteria);
+        let new_dec = updates.decisions.as_deref().unwrap_or(&task.decisions);
+        let new_impl: Option<&str> = match &updates.implementation_plan {
+            None => task.implementation_plan.as_deref(),
+            Some(inner) => inner.as_deref(),
+        };
+        let new_exec: Option<&str> = match &updates.execution_record {
+            None => task.execution_record.as_deref(),
+            Some(inner) => inner.as_deref(),
+        };
+        let new_repro: Option<&str> = match &updates.reproduction {
+            None => task.reproduction.as_deref(),
+            Some(inner) => inner.as_deref(),
+        };
+        let new_root: Option<&str> = match &updates.root_cause {
+            None => task.root_cause.as_deref(),
+            Some(inner) => inner.as_deref(),
+        };
+        let new_refs = updates.context_refs.as_deref().unwrap_or(&task.context_refs);
+        let new_files = updates.files.as_deref().unwrap_or(&task.files);
+        let new_tags = updates.tags.as_deref().unwrap_or(&task.tags);
+        let history_json = serde_json::to_string(&history)?;
+
+        conn.execute(
+            "UPDATE tasks SET \
+                title=?1, description=?2, category=?3, status=?4, slice_type=?5, \
+                acceptance_criteria=?6, decisions=?7, implementation_plan=?8, \
+                execution_record=?9, reproduction=?10, root_cause=?11, \
+                context_refs=?12, files=?13, tags=?14, history=?15, updated_at=?16 \
+            WHERE id=?17",
+            rusqlite::params![
+                new_title,
+                new_desc,
+                new_cat,
+                new_status,
+                new_slice,
+                new_ac,
+                new_dec,
+                new_impl,
+                new_exec,
+                new_repro,
+                new_root,
+                new_refs,
+                new_files,
+                new_tags,
+                history_json,
+                now,
+                task.id.as_bytes().as_slice(),
+            ],
+        )?;
+
+        get_task_by_uuid(&conn, &task.id)?
+            .ok_or_else(|| YojanaError::NotFound("updated task".into()))
+    }
+
+    // --- Query methods ---
+
+    pub fn list_tasks(&self, filter: &TaskQueryFilter) -> Result<Vec<TaskRow>, YojanaError> {
+        let conn = self.conn.lock();
+        let mut sql = String::from(TASK_SELECT);
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref project_id) = filter.project_id {
+            params.push(Box::new(project_id.as_bytes().to_vec()));
+            conditions.push(format!("t.project_id = ?{}", params.len()));
+        }
+        if let Some(ref status) = filter.status {
+            params.push(Box::new(status.clone()));
+            conditions.push(format!("t.status = ?{}", params.len()));
+        }
+        if let Some(ref category) = filter.category {
+            params.push(Box::new(category.clone()));
+            conditions.push(format!("t.category = ?{}", params.len()));
+        }
+        if let Some(ref slice_type) = filter.slice_type {
+            params.push(Box::new(slice_type.clone()));
+            conditions.push(format!("t.slice_type = ?{}", params.len()));
+        }
+        if let Some(ref tag) = filter.tag {
+            params.push(Box::new(tag.clone()));
+            conditions.push(format!(
+                "EXISTS (SELECT 1 FROM json_each(t.tags) WHERE json_each.value = ?{})",
+                params.len()
+            ));
+        }
+
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql.push_str(" ORDER BY t.updated_at DESC");
+
+        let limit = filter.limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+        params.push(Box::new(limit));
+        sql.push_str(&format!(" LIMIT ?{}", params.len()));
+
+        if let Some(offset) = filter.offset {
+            params.push(Box::new(offset));
+            sql.push_str(&format!(" OFFSET ?{}", params.len()));
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), map_task_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_depends_on_with_status(
+        &self,
+    ) -> Result<Vec<(Uuid, Uuid, String)>, YojanaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT e.source_task_id, e.target_task_id, t.status \
+             FROM task_edges e JOIN tasks t ON e.target_task_id = t.id \
+             WHERE e.edge_type = 'depends_on'",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let src = uuid_from_blob(row, "source_task_id")?;
+                let tgt = uuid_from_blob(row, "target_task_id")?;
+                let status: String = row.get("status")?;
+                Ok((src, tgt, status))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // --- Edge methods ---
+
+    pub fn create_edge(
+        &self,
+        source_task_id: Uuid,
+        target_task_id: Uuid,
+        edge_type: &str,
+        note: Option<&str>,
+    ) -> Result<EdgeRow, YojanaError> {
+        if !VALID_EDGE_TYPES.contains(&edge_type) {
+            return Err(YojanaError::InvalidInput(format!(
+                "invalid edge_type '{edge_type}'; valid: {}",
+                VALID_EDGE_TYPES.join(", ")
+            )));
+        }
+        if source_task_id == target_task_id {
+            return Err(YojanaError::InvalidInput(
+                "self-edges not allowed".into(),
+            ));
+        }
+
+        let conn = self.conn.lock();
+
+        get_task_by_uuid(&conn, &source_task_id)?
+            .ok_or_else(|| YojanaError::NotFound(format!("source task '{source_task_id}'")))?;
+        get_task_by_uuid(&conn, &target_task_id)?
+            .ok_or_else(|| YojanaError::NotFound(format!("target task '{target_task_id}'")))?;
+
+        if edge_type == "depends_on" {
+            let existing = load_depends_on_edges(&conn)?;
+            crate::graph::would_cycle(&existing, source_task_id, target_task_id)?;
+        }
+
+        let id = Uuid::now_v7();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        conn.execute(
+            "INSERT INTO task_edges (id, source_task_id, target_task_id, edge_type, note, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                id.as_bytes().as_slice(),
+                source_task_id.as_bytes().as_slice(),
+                target_task_id.as_bytes().as_slice(),
+                edge_type,
+                note,
+                now,
+            ],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(ref err, _)
+                if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
+            {
+                YojanaError::Conflict(format!(
+                    "edge ({source_task_id}, {target_task_id}, {edge_type}) already exists"
+                ))
+            }
+            other => YojanaError::Db(other),
+        })?;
+
+        get_edge_by_id(&conn, &id)?
+            .ok_or_else(|| YojanaError::NotFound("just-created edge".into()))
+    }
+
+    pub fn delete_edge(&self, id: &Uuid) -> Result<(), YojanaError> {
+        let conn = self.conn.lock();
+        let deleted = conn.execute(
+            "DELETE FROM task_edges WHERE id = ?1",
+            rusqlite::params![id.as_bytes().as_slice()],
+        )?;
+        if deleted == 0 {
+            return Err(YojanaError::NotFound(format!("edge '{id}'")));
+        }
+        Ok(())
+    }
+
+    pub fn list_edges_for_task(&self, task_id: &Uuid) -> Result<Vec<EdgeRow>, YojanaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, source_task_id, target_task_id, edge_type, note, created_at \
+             FROM task_edges WHERE source_task_id = ?1 OR target_task_id = ?1 \
+             ORDER BY created_at",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![task_id.as_bytes().as_slice()], map_edge_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // --- Conversation methods ---
+
+    pub fn append_conversation_message(
+        &self,
+        task_id: &Uuid,
+        text: &str,
+        author: Option<&str>,
+    ) -> Result<serde_json::Value, YojanaError> {
+        let conn = self.conn.lock();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let message = serde_json::json!({
+            "ts": now,
+            "text": text,
+            "author": author.unwrap_or("user"),
+        });
+
+        let existing: Option<(Vec<u8>, String)> = conn
+            .prepare("SELECT id, messages FROM task_conversations WHERE task_id = ?1")?
+            .query_row(
+                rusqlite::params![task_id.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        if let Some((id_bytes, messages_json)) = existing {
+            let mut messages: Vec<serde_json::Value> = match serde_json::from_str(&messages_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("corrupt JSON in conversation messages: {e}");
+                    Vec::new()
+                }
+            };
+            messages.push(message.clone());
+            let updated_json = serde_json::to_string(&messages)?;
+            conn.execute(
+                "UPDATE task_conversations SET messages = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![updated_json, now, id_bytes],
+            )?;
+        } else {
+            let id = Uuid::now_v7();
+            let messages_json = serde_json::to_string(&vec![&message])?;
+            conn.execute(
+                "INSERT INTO task_conversations (id, task_id, messages, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![
+                    id.as_bytes().as_slice(),
+                    task_id.as_bytes().as_slice(),
+                    messages_json,
+                    now,
+                ],
+            )?;
+        }
+
+        Ok(message)
+    }
+
+    pub fn get_conversation_messages(
+        &self,
+        task_id: &Uuid,
+    ) -> Result<Vec<serde_json::Value>, YojanaError> {
+        let conn = self.conn.lock();
+        let messages_json: Option<String> = conn
+            .prepare("SELECT messages FROM task_conversations WHERE task_id = ?1")?
+            .query_row(
+                rusqlite::params![task_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match messages_json {
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    tracing::warn!("corrupt JSON in conversation messages: {e}");
+                    Ok(Vec::new())
+                }
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+fn load_depends_on_edges(conn: &Connection) -> Result<Vec<(Uuid, Uuid)>, YojanaError> {
+    let mut stmt = conn.prepare(
+        "SELECT source_task_id, target_task_id FROM task_edges WHERE edge_type = 'depends_on'",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let src = uuid_from_blob(row, "source_task_id")?;
+            let tgt = uuid_from_blob(row, "target_task_id")?;
+            Ok((src, tgt))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn map_edge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EdgeRow> {
+    Ok(EdgeRow {
+        id: uuid_from_blob(row, "id")?,
+        source_task_id: uuid_from_blob(row, "source_task_id")?,
+        target_task_id: uuid_from_blob(row, "target_task_id")?,
+        edge_type: row.get("edge_type")?,
+        note: row.get("note")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+fn get_edge_by_id(conn: &Connection, id: &Uuid) -> Result<Option<EdgeRow>, YojanaError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source_task_id, target_task_id, edge_type, note, created_at \
+         FROM task_edges WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![id.as_bytes().as_slice()], map_edge_row)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Db {
+        Db::open_in_memory().unwrap()
+    }
+
+    // --- Project tests ---
+
+    #[test]
+    fn create_and_get_project() {
+        let db = test_db();
+        let p = db.create_project("test-proj", "Test Project", "A test").unwrap();
+        assert_eq!(p.slug, "test-proj");
+        assert_eq!(p.title, "Test Project");
+        assert_eq!(p.description, "A test");
+        assert_eq!(p.status, "active");
+
+        let by_id = db.get_project(Some(&p.id.to_string()), None).unwrap().unwrap();
+        assert_eq!(by_id.slug, "test-proj");
+
+        let by_slug = db.get_project(None, Some("test-proj")).unwrap().unwrap();
+        assert_eq!(by_slug.id, p.id);
+    }
+
+    #[test]
+    fn slug_uniqueness() {
+        let db = test_db();
+        db.create_project("dupe", "First", "").unwrap();
+        let err = db.create_project("dupe", "Second", "").unwrap_err();
+        assert!(matches!(err, YojanaError::Conflict(_)));
+    }
+
+    #[test]
+    fn list_with_status_filter() {
+        let db = test_db();
+        db.create_project("a", "A", "").unwrap();
+        db.create_project("b", "B", "").unwrap();
+
+        let all = db.list_projects(None, None, None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let active = db.list_projects(Some("active"), None, None).unwrap();
+        assert_eq!(active.len(), 2);
+
+        let paused = db.list_projects(Some("paused"), None, None).unwrap();
+        assert_eq!(paused.len(), 0);
+    }
+
+    #[test]
+    fn update_records_history() {
+        let db = test_db();
+        let p = db.create_project("test", "Original", "desc").unwrap();
+
+        let updated = db
+            .update_project(
+                Some(&p.id.to_string()),
+                None,
+                ProjectUpdates {
+                    title: Some("New Title".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.title, "New Title");
+        assert_eq!(updated.description, "desc");
+
+        let history: Vec<HistoryEntry> = serde_json::from_str(&updated.history).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].kind, "updated");
+    }
+
+    #[test]
+    fn update_status_records_history() {
+        let db = test_db();
+        db.create_project("test", "Test", "").unwrap();
+
+        let updated = db
+            .update_project(
+                None,
+                Some("test"),
+                ProjectUpdates {
+                    status: Some("paused".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.status, "paused");
+
+        let history: Vec<HistoryEntry> = serde_json::from_str(&updated.history).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].kind, "status_changed");
+    }
+
+    #[test]
+    fn get_nonexistent_returns_none() {
+        let db = test_db();
+        let result = db.get_project(None, Some("nope")).unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- Task tests ---
+
+    fn create_test_task(db: &Db, project_slug: &str, title: &str) -> TaskRow {
+        let p = db
+            .get_project(None, Some(project_slug))
+            .unwrap()
+            .unwrap();
+        db.create_task(CreateTaskParams {
+            project_id: p.id,
+            project_slug: p.slug,
+            title: title.to_string(),
+            description: String::new(),
+            category: None,
+            slice_type: None,
+            acceptance_criteria: "[]".into(),
+            decisions: "[]".into(),
+            context_refs: "[]".into(),
+            files: "[]".into(),
+            tags: "[]".into(),
+            implementation_plan: None,
+            execution_record: None,
+            reproduction: None,
+            root_cause: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn create_task_with_sequence_numbers() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+
+        let t1 = create_test_task(&db, "proj", "First");
+        let t2 = create_test_task(&db, "proj", "Second");
+        let t3 = create_test_task(&db, "proj", "Third");
+
+        assert_eq!(t1.sequence_number, 1);
+        assert_eq!(t2.sequence_number, 2);
+        assert_eq!(t3.sequence_number, 3);
+        assert_eq!(t1.status, "needs-triage");
+        assert_eq!(t1.project_slug, "proj");
+    }
+
+    #[test]
+    fn sequence_numbers_are_per_project() {
+        let db = test_db();
+        db.create_project("alpha", "Alpha", "").unwrap();
+        db.create_project("beta", "Beta", "").unwrap();
+
+        let a1 = create_test_task(&db, "alpha", "A1");
+        let b1 = create_test_task(&db, "beta", "B1");
+        let a2 = create_test_task(&db, "alpha", "A2");
+
+        assert_eq!(a1.sequence_number, 1);
+        assert_eq!(b1.sequence_number, 1);
+        assert_eq!(a2.sequence_number, 2);
+    }
+
+    #[test]
+    fn get_task_by_uuid() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+
+        let fetched = db.get_task(&t.id.to_string()).unwrap().unwrap();
+        assert_eq!(fetched.title, "Task");
+        assert_eq!(fetched.project_slug, "proj");
+    }
+
+    #[test]
+    fn get_task_by_slug_seq() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        create_test_task(&db, "proj", "First");
+        let t2 = create_test_task(&db, "proj", "Second");
+
+        let fetched = db.get_task("proj/2").unwrap().unwrap();
+        assert_eq!(fetched.id, t2.id);
+        assert_eq!(fetched.title, "Second");
+    }
+
+    #[test]
+    fn update_task_partial() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Original");
+
+        let updated = db
+            .update_task(
+                &t.id.to_string(),
+                TaskUpdates {
+                    title: Some("Changed".into()),
+                    category: Some(Some("bug".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.title, "Changed");
+        assert_eq!(updated.category.as_deref(), Some("bug"));
+        assert_eq!(updated.status, "needs-triage"); // unchanged
+    }
+
+    #[test]
+    fn json_round_trip() {
+        let db = test_db();
+        let p = db.create_project("proj", "Project", "").unwrap();
+
+        let ac = serde_json::to_string(&vec![
+            serde_json::json!({"id": "1", "text": "it works", "done": false}),
+        ])
+        .unwrap();
+        let refs = serde_json::to_string(&vec![
+            serde_json::json!({"type": "git:commit", "value": "abc123"}),
+        ])
+        .unwrap();
+        let tags = serde_json::to_string(&vec!["infra", "urgent"]).unwrap();
+
+        let t = db
+            .create_task(CreateTaskParams {
+                project_id: p.id,
+                project_slug: p.slug,
+                title: "JSON test".into(),
+                description: String::new(),
+                category: Some("enhancement".into()),
+                slice_type: Some("AFK".into()),
+                acceptance_criteria: ac,
+                decisions: "[]".into(),
+                context_refs: refs,
+                files: "[]".into(),
+                tags,
+                implementation_plan: Some("do the thing".into()),
+                execution_record: None,
+                reproduction: None,
+                root_cause: None,
+            })
+            .unwrap();
+
+        let fetched = db.get_task(&t.id.to_string()).unwrap().unwrap();
+        let ac_parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&fetched.acceptance_criteria).unwrap();
+        assert_eq!(ac_parsed.len(), 1);
+        assert_eq!(ac_parsed[0]["text"], "it works");
+
+        let refs_parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&fetched.context_refs).unwrap();
+        assert_eq!(refs_parsed[0]["type"], "git:commit");
+
+        let tags_parsed: Vec<String> = serde_json::from_str(&fetched.tags).unwrap();
+        assert_eq!(tags_parsed, vec!["infra", "urgent"]);
+
+        assert_eq!(fetched.implementation_plan.as_deref(), Some("do the thing"));
+        assert_eq!(fetched.category.as_deref(), Some("enhancement"));
+        assert_eq!(fetched.slice_type.as_deref(), Some("AFK"));
+    }
+
+    #[test]
+    fn cascade_delete_project_removes_tasks() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+        let task_id = t.id.to_string();
+
+        // Delete project by dropping and recreating the table... actually
+        // we don't have a delete_project method. Use raw SQL.
+        {
+            let conn = db.conn.lock();
+            let p = get_by_slug(&conn, "proj").unwrap().unwrap();
+            conn.execute(
+                "DELETE FROM projects WHERE id = ?1",
+                rusqlite::params![p.id.as_bytes().as_slice()],
+            )
+            .unwrap();
+        }
+
+        let result = db.get_task(&task_id).unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- Slice 03: state machine integration ---
+
+    #[test]
+    fn valid_status_transition_succeeds() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+        assert_eq!(t.status, "needs-triage");
+
+        let updated = db
+            .update_task(
+                &t.id.to_string(),
+                TaskUpdates {
+                    status: Some("ready-for-agent".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.status, "ready-for-agent");
+
+        let history: Vec<HistoryEntry> = serde_json::from_str(&updated.history).unwrap();
+        let status_entries: Vec<_> = history
+            .iter()
+            .filter(|h| h.kind == "status_changed")
+            .collect();
+        assert_eq!(status_entries.len(), 1);
+        assert_eq!(status_entries[0].payload["from"], "needs-triage");
+        assert_eq!(status_entries[0].payload["to"], "ready-for-agent");
+    }
+
+    #[test]
+    fn invalid_status_transition_rejected() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+
+        let err = db
+            .update_task(
+                &t.id.to_string(),
+                TaskUpdates {
+                    status: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid transition"));
+    }
+
+    #[test]
+    fn noop_status_update_skips_validation() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+
+        let updated = db
+            .update_task(
+                &t.id.to_string(),
+                TaskUpdates {
+                    status: Some("needs-triage".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let history: Vec<HistoryEntry> = serde_json::from_str(&updated.history).unwrap();
+        let status_entries: Vec<_> = history
+            .iter()
+            .filter(|h| h.kind == "status_changed")
+            .collect();
+        assert_eq!(status_entries.len(), 0);
+    }
+
+    #[test]
+    fn non_status_update_bypasses_state_machine() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+
+        let updated = db
+            .update_task(
+                &t.id.to_string(),
+                TaskUpdates {
+                    title: Some("New title".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.title, "New title");
+        assert_eq!(updated.status, "needs-triage");
+    }
+
+    #[test]
+    fn done_is_terminal_except_reopen() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+        let id = t.id.to_string();
+
+        db.update_task(&id, TaskUpdates { status: Some("ready-for-agent".into()), ..Default::default() }).unwrap();
+        db.update_task(&id, TaskUpdates { status: Some("in-progress".into()), ..Default::default() }).unwrap();
+        db.update_task(&id, TaskUpdates { status: Some("done".into()), ..Default::default() }).unwrap();
+
+        let err = db.update_task(&id, TaskUpdates { status: Some("in-progress".into()), ..Default::default() }).unwrap_err();
+        assert!(err.to_string().contains("invalid transition"));
+
+        let reopened = db.update_task(&id, TaskUpdates { status: Some("needs-triage".into()), ..Default::default() }).unwrap();
+        assert_eq!(reopened.status, "needs-triage");
+    }
+
+    // --- Slice 04: edge CRUD ---
+
+    #[test]
+    fn create_and_list_edges() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        let edge = db
+            .create_edge(t1.id, t2.id, "depends_on", Some("t1 needs t2"))
+            .unwrap();
+        assert_eq!(edge.source_task_id, t1.id);
+        assert_eq!(edge.target_task_id, t2.id);
+        assert_eq!(edge.edge_type, "depends_on");
+        assert_eq!(edge.note.as_deref(), Some("t1 needs t2"));
+
+        let edges = db.list_edges_for_task(&t1.id).unwrap();
+        assert_eq!(edges.len(), 1);
+
+        let edges = db.list_edges_for_task(&t2.id).unwrap();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn delete_edge() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        let edge = db.create_edge(t1.id, t2.id, "relates_to", None).unwrap();
+        db.delete_edge(&edge.id).unwrap();
+
+        let edges = db.list_edges_for_task(&t1.id).unwrap();
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn delete_nonexistent_edge_errors() {
+        let db = test_db();
+        let fake_id = Uuid::now_v7();
+        let err = db.delete_edge(&fake_id).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn duplicate_edge_rejected() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+        let err = db.create_edge(t1.id, t2.id, "depends_on", None).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn same_pair_different_types_allowed() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+        db.create_edge(t1.id, t2.id, "relates_to", None).unwrap();
+
+        let edges = db.list_edges_for_task(&t1.id).unwrap();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn cycle_detection_rejects_direct_cycle() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+        let err = db.create_edge(t2.id, t1.id, "depends_on", None).unwrap_err();
+        assert!(err.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn cycle_detection_rejects_multi_hop() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+        let t3 = create_test_task(&db, "proj", "Task 3");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+        db.create_edge(t2.id, t3.id, "depends_on", None).unwrap();
+        let err = db.create_edge(t3.id, t1.id, "depends_on", None).unwrap_err();
+        assert!(err.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn non_dependency_edges_skip_cycle_check() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        db.create_edge(t1.id, t2.id, "relates_to", None).unwrap();
+        db.create_edge(t2.id, t1.id, "relates_to", None).unwrap();
+    }
+
+    #[test]
+    fn invalid_edge_type_rejected() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+
+        let err = db.create_edge(t1.id, t2.id, "blocks", None).unwrap_err();
+        assert!(err.to_string().contains("invalid edge_type"));
+    }
+
+    #[test]
+    fn cross_project_edges() {
+        let db = test_db();
+        db.create_project("alpha", "Alpha", "").unwrap();
+        db.create_project("beta", "Beta", "").unwrap();
+        let t1 = create_test_task(&db, "alpha", "Task A");
+        let t2 = create_test_task(&db, "beta", "Task B");
+
+        let edge = db
+            .create_edge(t1.id, t2.id, "motivated_by", None)
+            .unwrap();
+        assert_eq!(edge.source_task_id, t1.id);
+        assert_eq!(edge.target_task_id, t2.id);
+    }
+
+    #[test]
+    fn cascade_delete_task_removes_edges() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Task 1");
+        let t2 = create_test_task(&db, "proj", "Task 2");
+        let t3 = create_test_task(&db, "proj", "Task 3");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+        db.create_edge(t3.id, t2.id, "relates_to", None).unwrap();
+
+        {
+            let conn = db.conn.lock();
+            conn.execute(
+                "DELETE FROM tasks WHERE id = ?1",
+                rusqlite::params![t2.id.as_bytes().as_slice()],
+            )
+            .unwrap();
+        }
+
+        let edges = db.list_edges_for_task(&t1.id).unwrap();
+        assert!(edges.is_empty());
+        let edges = db.list_edges_for_task(&t3.id).unwrap();
+        assert!(edges.is_empty());
+    }
+
+    // --- Slice 05: query + ready detection ---
+
+    fn advance_to(db: &Db, id: &str, statuses: &[&str]) {
+        for s in statuses {
+            db.update_task(id, TaskUpdates { status: Some((*s).into()), ..Default::default() }).unwrap();
+        }
+    }
+
+    #[test]
+    fn list_tasks_no_filter() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        create_test_task(&db, "proj", "A");
+        create_test_task(&db, "proj", "B");
+
+        let tasks = db.list_tasks(&TaskQueryFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn list_tasks_filter_by_status() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "A");
+        create_test_task(&db, "proj", "B");
+
+        advance_to(&db, &t1.id.to_string(), &["ready-for-agent"]);
+
+        let tasks = db.list_tasks(&TaskQueryFilter {
+            status: Some("ready-for-agent".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "A");
+    }
+
+    #[test]
+    fn list_tasks_filter_by_project() {
+        let db = test_db();
+        let p1 = db.create_project("alpha", "Alpha", "").unwrap();
+        db.create_project("beta", "Beta", "").unwrap();
+        create_test_task(&db, "alpha", "A");
+        create_test_task(&db, "beta", "B");
+
+        let tasks = db.list_tasks(&TaskQueryFilter {
+            project_id: Some(p1.id),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "A");
+    }
+
+    #[test]
+    fn list_tasks_filter_by_tag() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let p = db.get_project(None, Some("proj")).unwrap().unwrap();
+        db.create_task(CreateTaskParams {
+            project_id: p.id,
+            project_slug: p.slug.clone(),
+            title: "Tagged".into(),
+            description: String::new(),
+            category: None,
+            slice_type: None,
+            acceptance_criteria: "[]".into(),
+            decisions: "[]".into(),
+            context_refs: "[]".into(),
+            files: "[]".into(),
+            tags: serde_json::to_string(&vec!["infra"]).unwrap(),
+            implementation_plan: None,
+            execution_record: None,
+            reproduction: None,
+            root_cause: None,
+        }).unwrap();
+        create_test_task(&db, "proj", "Untagged");
+
+        let tasks = db.list_tasks(&TaskQueryFilter {
+            tag: Some("infra".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Tagged");
+    }
+
+    #[test]
+    fn cross_project_query() {
+        let db = test_db();
+        db.create_project("alpha", "Alpha", "").unwrap();
+        db.create_project("beta", "Beta", "").unwrap();
+        create_test_task(&db, "alpha", "A");
+        create_test_task(&db, "beta", "B");
+
+        let tasks = db.list_tasks(&TaskQueryFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn depends_on_with_status() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "A");
+        let t2 = create_test_task(&db, "proj", "B");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+
+        let deps = db.list_depends_on_with_status().unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, t1.id);
+        assert_eq!(deps[0].1, t2.id);
+        assert_eq!(deps[0].2, "needs-triage");
+    }
+
+    #[test]
+    fn ready_detection_no_deps() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "A");
+        let id = t.id.to_string();
+        advance_to(&db, &id, &["ready-for-agent"]);
+
+        let deps = db.list_depends_on_with_status().unwrap();
+        assert!(crate::graph::is_ready(t.id, &deps));
+    }
+
+    #[test]
+    fn ready_detection_deps_done() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Depends");
+        let t2 = create_test_task(&db, "proj", "Dependency");
+
+        let id1 = t1.id.to_string();
+        let id2 = t2.id.to_string();
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+
+        advance_to(&db, &id1, &["ready-for-agent"]);
+        advance_to(&db, &id2, &["ready-for-agent", "in-progress", "done"]);
+
+        let deps = db.list_depends_on_with_status().unwrap();
+        assert!(crate::graph::is_ready(t1.id, &deps));
+    }
+
+    #[test]
+    fn ready_detection_deps_not_done() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Depends");
+        let t2 = create_test_task(&db, "proj", "Dependency");
+
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+
+        let deps = db.list_depends_on_with_status().unwrap();
+        assert!(!crate::graph::is_ready(t1.id, &deps));
+    }
+
+    #[test]
+    fn ready_detection_diamond() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let leaf = create_test_task(&db, "proj", "Leaf");
+        let mid1 = create_test_task(&db, "proj", "Mid1");
+        let mid2 = create_test_task(&db, "proj", "Mid2");
+
+        db.create_edge(leaf.id, mid1.id, "depends_on", None).unwrap();
+        db.create_edge(leaf.id, mid2.id, "depends_on", None).unwrap();
+
+        let mid1_id = mid1.id.to_string();
+        let mid2_id = mid2.id.to_string();
+        advance_to(&db, &mid1_id, &["ready-for-agent", "in-progress", "done"]);
+
+        let deps = db.list_depends_on_with_status().unwrap();
+        assert!(!crate::graph::is_ready(leaf.id, &deps));
+
+        advance_to(&db, &mid2_id, &["ready-for-agent", "in-progress", "done"]);
+
+        let deps = db.list_depends_on_with_status().unwrap();
+        assert!(crate::graph::is_ready(leaf.id, &deps));
+    }
+
+    // --- Slice 06: conversations ---
+
+    #[test]
+    fn append_and_get_conversation() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+
+        let msgs = db.get_conversation_messages(&t.id).unwrap();
+        assert!(msgs.is_empty());
+
+        let m1 = db.append_conversation_message(&t.id, "hello", Some("agent")).unwrap();
+        assert_eq!(m1["text"], "hello");
+        assert_eq!(m1["author"], "agent");
+
+        let m2 = db.append_conversation_message(&t.id, "world", None).unwrap();
+        assert_eq!(m2["text"], "world");
+        assert_eq!(m2["author"], "user");
+
+        let msgs = db.get_conversation_messages(&t.id).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["text"], "hello");
+        assert_eq!(msgs[1]["text"], "world");
+    }
+
+    #[test]
+    fn conversation_cascade_on_task_delete() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+        db.append_conversation_message(&t.id, "msg", None).unwrap();
+
+        {
+            let conn = db.conn.lock();
+            conn.execute(
+                "DELETE FROM tasks WHERE id = ?1",
+                rusqlite::params![t.id.as_bytes().as_slice()],
+            ).unwrap();
+        }
+
+        let msgs = db.get_conversation_messages(&t.id).unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    // --- Slice 06: context integration ---
+
+    #[test]
+    fn context_summary_integration() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Main Task");
+        let t2 = create_test_task(&db, "proj", "Dep");
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+
+        let edges = db.list_edges_for_task(&t1.id).unwrap();
+        let bundle = crate::context::summary(&t1, &edges);
+
+        assert_eq!(bundle.human_id, "proj/1");
+        assert_eq!(bundle.title, "Main Task");
+        assert_eq!(bundle.edge_counts.get("depends_on_out"), Some(&1));
+    }
+
+    #[test]
+    fn context_working_integration() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t1 = create_test_task(&db, "proj", "Main");
+        let t2 = create_test_task(&db, "proj", "Neighbor");
+        db.create_edge(t1.id, t2.id, "depends_on", None).unwrap();
+        db.append_conversation_message(&t1.id, "started work", Some("agent")).unwrap();
+
+        let edges = db.list_edges_for_task(&t1.id).unwrap();
+        let nids = crate::context::neighbor_ids(t1.id, &edges);
+        assert_eq!(nids.len(), 1);
+
+        let mut neighbors_with_edges = Vec::new();
+        for nid in &nids {
+            let ntask = db.get_task(&nid.to_string()).unwrap().unwrap();
+            let nedges = db.list_edges_for_task(&ntask.id).unwrap();
+            neighbors_with_edges.push((ntask, nedges));
+        }
+
+        let messages = db.get_conversation_messages(&t1.id).unwrap();
+        let bundle = crate::context::working(&t1, &neighbors_with_edges, &messages, 10);
+
+        assert_eq!(bundle.human_id, "proj/1");
+        assert_eq!(bundle.neighbors.len(), 1);
+        assert_eq!(bundle.neighbors[0].human_id, "proj/2");
+        assert_eq!(bundle.recent_messages.len(), 1);
+        assert_eq!(bundle.recent_messages[0]["text"], "started work");
+    }
+
+    #[test]
+    fn tag_filter_no_wildcard_false_positive() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let p = db.get_project(None, Some("proj")).unwrap().unwrap();
+        db.create_task(CreateTaskParams {
+            project_id: p.id,
+            project_slug: p.slug.clone(),
+            title: "Has a%b tag".into(),
+            description: String::new(),
+            category: None,
+            slice_type: None,
+            acceptance_criteria: "[]".into(),
+            decisions: "[]".into(),
+            context_refs: "[]".into(),
+            files: "[]".into(),
+            tags: serde_json::to_string(&vec!["a%b"]).unwrap(),
+            implementation_plan: None,
+            execution_record: None,
+            reproduction: None,
+            root_cause: None,
+        }).unwrap();
+
+        let matches = db.list_tasks(&TaskQueryFilter {
+            tag: Some("a%b".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(matches.len(), 1);
+
+        let no_match = db.list_tasks(&TaskQueryFilter {
+            tag: Some("axb".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(no_match.len(), 0, "LIKE wildcard should not match 'axb'");
+    }
+
+    #[test]
+    fn clear_nullable_fields_to_null() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let p = db.get_project(None, Some("proj")).unwrap().unwrap();
+        let t = db.create_task(CreateTaskParams {
+            project_id: p.id,
+            project_slug: p.slug.clone(),
+            title: "Clearable".into(),
+            description: String::new(),
+            category: Some("bug".into()),
+            slice_type: Some("AFK".into()),
+            acceptance_criteria: "[]".into(),
+            decisions: "[]".into(),
+            context_refs: "[]".into(),
+            files: "[]".into(),
+            tags: "[]".into(),
+            implementation_plan: Some("plan".into()),
+            execution_record: None,
+            reproduction: None,
+            root_cause: None,
+        }).unwrap();
+        assert_eq!(t.category.as_deref(), Some("bug"));
+
+        let cleared = db.update_task(&t.id.to_string(), TaskUpdates {
+            category: Some(None),
+            slice_type: Some(None),
+            implementation_plan: Some(None),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(cleared.category, None);
+        assert_eq!(cleared.slice_type, None);
+        assert_eq!(cleared.implementation_plan, None);
+    }
+
+    #[test]
+    fn project_status_validation_rejects_typo() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let err = db.update_project(None, Some("proj"), ProjectUpdates {
+            status: Some("actve".into()),
+            ..Default::default()
+        }).unwrap_err();
+        assert!(err.to_string().contains("invalid project status"));
+    }
+
+    #[test]
+    fn project_status_validation_accepts_valid() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let p = db.update_project(None, Some("proj"), ProjectUpdates {
+            status: Some("paused".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(p.status, "paused");
+    }
+
+    #[test]
+    fn self_edge_rejected() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Solo");
+        let err = db.create_edge(t.id, t.id, "relates_to", None).unwrap_err();
+        assert!(err.to_string().contains("self-edges not allowed"));
+    }
+
+    #[test]
+    fn migration_table_populated() {
+        let db = test_db();
+        let conn = db.conn.lock();
+        let count: i64 = conn
+            .prepare("SELECT COUNT(*) FROM _yojana_migrations")
+            .unwrap()
+            .query_row([], |row| row.get(0))
+            .unwrap();
+        assert!(count >= 5, "expected at least 5 migrations applied, got {count}");
+    }
+
+    #[test]
+    fn in_progress_renamed_to_hyphen() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        let t = create_test_task(&db, "proj", "Task");
+        let id = t.id.to_string();
+        advance_to(&db, &id, &["ready-for-agent", "in-progress"]);
+        let fetched = db.get_task(&id).unwrap().unwrap();
+        assert_eq!(fetched.status, "in-progress");
+    }
+
+    #[test]
+    fn pagination_limits_results() {
+        let db = test_db();
+        db.create_project("proj", "Project", "").unwrap();
+        for i in 0..5 {
+            create_test_task(&db, "proj", &format!("Task {i}"));
+        }
+
+        let page = db.list_tasks(&TaskQueryFilter {
+            limit: Some(2),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(page.len(), 2);
+
+        let page2 = db.list_tasks(&TaskQueryFilter {
+            limit: Some(2),
+            offset: Some(2),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_ne!(page[0].id, page2[0].id);
+    }
+
+    #[test]
+    fn pagination_projects() {
+        let db = test_db();
+        for i in 0..5 {
+            db.create_project(&format!("p{i}"), &format!("Project {i}"), "").unwrap();
+        }
+
+        let page = db.list_projects(None, Some(3), None).unwrap();
+        assert_eq!(page.len(), 3);
+
+        let page2 = db.list_projects(None, Some(3), Some(3)).unwrap();
+        assert_eq!(page2.len(), 2);
+    }
+}

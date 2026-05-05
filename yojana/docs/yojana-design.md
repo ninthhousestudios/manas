@@ -150,17 +150,21 @@ motivated_by  — source exists because of target (e.g. refactor motivated by a 
 
 ### context_refs
 
-Cross-service pointers, jsonb array of strings:
+Cross-service pointers, jsonb array of typed records sharing the manas-wide ref shape (see `docs/manas-architecture.md` § cross-tier identity). **Not opaque strings.**
 
-```
-"docs/adr/0007"                  — repo-relative ADR path
-"CONTEXT.md#order-intake"        — domain glossary term
-"chitta:abc123def..."            — chitta memory id
-"sutra:my::module::Foo"          — sutra symbol qualified name
-"smriti:/path/to/file.rs"        — smriti file path
+```jsonc
+[
+  {"type": "doc:path",      "value": "docs/adr/0007",        "as_of": 1714780000000},
+  {"type": "chitta:memory", "value": "abc123def...",         "as_of": 1714780000000},
+  {"type": "sutra:symbol",  "value": "my::module::Foo",      "as_of": 1714780000000},
+  {"type": "smriti:hash",   "value": "<blake3>",             "as_of": 1714780000000},
+  {"type": "smriti:path",   "value": "/path/to/file.rs",     "as_of": 1714780000000}
+]
 ```
 
-Yojana does not validate or follow these — they are opaque strings to the server. The context shape generators resolve them at retrieval time. This keeps yojana decoupled from the other services.
+Allowlisted types: `smriti:hash`, `smriti:path`, `sutra:symbol`, `kosha:citation`, `yojana:task`, `chitta:memory`, `doc:path`. Path types are second-class — prefer `smriti:hash` or `sutra:symbol` when available so refs survive moves and renames.
+
+Yojana validates the shape but does not resolve refs. Resolution happens in **manas-cli** (per principle 9 — every cross-tier compound op lives in manas-cli, never inside a subsystem server). Yojana's binary stays a pure task-graph server.
 
 ## tool surface (v0)
 
@@ -192,7 +196,9 @@ Each shape is U-shape ordered: highest-recall content at start *and* end, less c
 | `planning` | writing the implementation plan | project brief, **upstream execution_records (multi-hop)**, prereq tasks' decisions, downstream tasks' specs, context_refs resolved (ADRs, CONTEXT.md terms, sutra symbols inlined) |
 | `agent` | actively coding | implementation_plan, full upstream execution context, file paths, acceptance_criteria, sutra symbol locations for `tasks.files`, related ADRs |
 
-**Cross-service joins are where manas pays off vs mymir.** Mymir cannot pull symbol locations from a code index because it has none. We pull from sutra (`sutra_outline` for files in `tasks.files`), from chitta (`search_memories` for related observations linked via `task_chitta`), from disk (read `docs/adr/N.md` for context_refs of that shape).
+**Cross-service joins are where manas pays off vs mymir.** Mymir cannot pull symbol locations from a code index because it has none.
+
+**Where the join happens:** `yojana_context` returns the *unresolved* bundle from yojana itself — task fields, edges, the typed `context_refs` array, and per-ref hints. The fan-out (`sutra_outline` for files in `tasks.files`, `search_memories` for chitta observations, ADR file reads, kosha citation lookups) lives in **manas-cli** as a compound tool. The agent calls one manas-cli tool; manas-cli orchestrates the cross-tier reads and assembles the U-shape result. Yojana's MCP surface stays the six pure tools described above.
 
 The `agent` shape is the answer to "where were we" — agent opens, asks for the bundle, walks in with the plan, the upstream decisions, the file paths, the AC, no briefing required.
 
