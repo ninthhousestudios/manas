@@ -14,8 +14,8 @@ Supersedes: `manas-cli/docs/roadmap.md` (2026-04-26, stale)
 | sangha | v0.1.0 live. SQLite. 9 MCP tools. Connection-bound identity. 2 migrations. |
 | kosha | Design (architecture.md, kosha-sketch.md, model-server-sketch.md). No code. |
 | yojana | Design (yojana-design.md). No code. |
-| mcpjungle | Integrated. Tool Groups + ACL + e2e tests in source. |
-| manas-cli | Docs only. No code. |
+| mcpjungle | Dropped. Replaced by manas-cli as composed-tool host. See `docs/manas-hub-design.md`. |
+| manas-cli | v0.1 code landed. Harness adapters (CC, Gemini, Codex), skill shells, `warm`/`done`/`health`/`reflect`/`status`. |
 
 The system works for single-session, single-user usage today. Active gaps:
 
@@ -24,6 +24,8 @@ The system works for single-session, single-user usage today. Active gaps:
 - Skill lock lifecycles depend on LLM cooperation.
 - Cross-tier joins (chitta ↔ smriti, chitta ↔ sutra) are JSONB string-matches.
 - No cost model. No specified failure semantics.
+- No auto-extraction — agent is sole memory curator (unreliable). See `chitta/docs/icm-steal-list.md`.
+- No composed cross-tier operations (wake-up, ingest). mcpjungle was a proxy, not an orchestrator.
 
 The arch review at `docs/arch-review-2026-05-03.md` is the authoritative source for *what's wrong*. This roadmap is the *what we're doing about it*.
 
@@ -92,21 +94,33 @@ These are decisions/changes that block or shape later phases. Cheap now, expensi
 ### 0.10 compound-tool location rule
 - Codify principle 9 explicitly: every cross-tier compound operation lives in manas-cli. Subsystem servers stay pure.
 - Concretely: yojana_context shape resolution, darshana joined views, kosha event consumers, and any future report generator are manas-cli code, not subsystem-server code.
-- mcpjungle may surface a compound tool as a single MCP tool; the implementation routes through manas-cli.
+- `manas serve` surfaces compound tools as MCP tools; the implementation fans out to chitta/yojana HTTP APIs.
+
+### 0.11 drop mcpjungle
+- mcpjungle is a proxy, not an orchestrator. It can't implement composed tools. See `docs/manas-hub-design.md`.
+- Remove mcpjungle from the topology. Individual services (chitta, yojana) are MCP servers in their own right.
+- `manas serve` (stdio MCP server) provides composed operations (`wake_up`, `ingest`). Per-project stdio servers (sutra, smriti) stay direct.
+- Tool Group ACL is deferred — all sessions are rich boot for now. ACL can be added to `manas serve` later.
+- Update `manas-cli` config: drop `mcpjungle_url`, add `chitta_url` and `yojana_url`.
+- Update failure-semantics table: remove "mcpjungle-down" rows.
 
 ---
 
 ## phase 1 — manas-cli scaffold + harness adapters
 
-**Why first:** Everything below depends on a host that can claim locks, inject env, and enforce Tool Group binding. Building it now unblocks two-layer skills.
+**Why first:** Everything below depends on a host that can claim locks, inject env, and provide composed operations. Building it now unblocks two-layer skills.
+
+**Status (2026-05-06):** Partially landed. Harness adapters (Claude Code, Gemini, Codex), skill shells, and lifecycle commands (`warm`, `done`, `health`, `reflect`, `status`) exist. mcpjungle references need removal.
 
 ### deliverables
 
-1. New crate `manas-cli` in the manas workspace.
-2. Subcommands: `manas health`, `manas warm`, `manas done`, `manas reflect`, `manas status`.
-3. Harness adapter trait. Concrete impls for Claude Code, Gemini CLI, opencode. Each adapter knows: how to invoke the harness with a given Tool Group, where to find the transcript, how to inject env.
+1. ~~New crate `manas-cli` in the manas workspace.~~ Done.
+2. ~~Subcommands: `manas health`, `manas warm`, `manas done`, `manas reflect`, `manas status`.~~ Done.
+3. ~~Harness adapter trait. Concrete impls for Claude Code, Gemini CLI, Codex CLI.~~ Done (opencode deferred to v2).
 4. Skill-shell library. A skill's shell is a Rust function: claim lock → set env → invoke LLM body → write outputs → release lock.
 5. Sideband daemon (minimal). Listens on a Unix socket; one initial endpoint: `path-move-notify` (smriti emits, chitta consumes).
+6. **`manas serve`** — stdio MCP server with composed tools (`manas_wake_up`, `manas_ingest`). Fans out to chitta and yojana HTTP APIs. See `docs/manas-hub-design.md`.
+7. **Config refactor** — drop `mcpjungle_url`, add `chitta_url` (default `http://127.0.0.1:3100`), `yojana_url` (default `http://127.0.0.1:4200`).
 
 ---
 
@@ -126,11 +140,14 @@ Output: same skills, harness-agnostic, deterministic concurrency.
 
 Land the chitta-side schema work from phase 0 and the things that need real implementation rather than docs.
 
-1. Migration 0007: `external_refs` typed column.
-2. Migration 0008: `invalidated_at`, `metadata.retired_at`, `metadata.retirement_reason`.
-3. Migration 0009: `derivations` table — `(model_id, [observation_ids], session_id, skill_name, prompt_hash)`. Wired by `/reflect` shell.
+1. ~~Migration 0007: `external_refs` typed column.~~ Done.
+2. ~~Migration 0008: `invalidated_at`, `metadata.retired_at`, `metadata.retirement_reason`.~~ Done.
+3. ~~Migration 0009: `derivations` table.~~ Done.
 4. `search_memories` updates: `exclude_retired`, `exclude_invalidated`, ref-typed filters.
 5. Optional: a `chitta show` CLI for human-direct inspection (principle 5).
+6. **Ingest HTTP endpoint** (`chitta/6`). `POST /ingest` accepts raw text, returns 202, queues for background extraction. Fire-and-forget write path for hooks — not an MCP tool.
+7. **Background extraction worker** (`chitta/7`). Tokio task: sentence splitting → BGE-M3 anchor classification → narration filtering → dedup → store. Hardcoded anchors. Respects P1, P3, P6, P9.
+8. **PostToolUse and Compact hooks** (`chitta/8`). Shell scripts that POST to `/ingest`. Thin shims — intelligence lives in the worker. Depends on 6 and 7.
 
 ---
 
@@ -202,10 +219,12 @@ Per `kosha/docs/architecture.md`.
 |---|---|---|
 | Phase 1 = sangha | Sangha is shipped (v0.1.0); not in current roadmap as a phase | Done. |
 | Phase 2 = smriti v0.1 | Smriti is shipped (v0.2.3); current roadmap = smriti v0.3 (blobs/revert) | Done. |
-| Phase 3 = mcpjungle integration | mcpjungle integrated; no longer a phase | Done. |
+| Phase 3 = mcpjungle integration | mcpjungle dropped (2026-05-06). Was a proxy, not an orchestrator. | `manas serve` replaces as composed-tool host. See `docs/manas-hub-design.md`. |
 | Phase 4 = chitta v0.0.4 + manas-cli | Split: phase 1 = manas-cli, phase 3 = chitta v0.0.4 | manas-cli is prerequisite to two-layer skills. |
 | Principle 10 = "CC-first" | Replaced by two-layer skills | Annotation indicated active disagreement; resolved 2026-05-03. |
 | No darshana decision criteria | Phase 5 gated by E1/E2 | Arch review demanded measurable graduation. |
 | No yojana | Phase 4 = yojana v0 | Yojana design landed 2026-04-30. |
 | No kosha | Phase 6 = kosha v0 | Kosha design stable; depends on smriti event stream. |
 | No external_refs | Phase 0.2 + phase 3 | Arch review identified weak cross-tier joins. |
+| No auto-extraction | Phase 3 items 6-8. chitta ingest + extraction worker + hooks. | ICM comparison (2026-05-06) identified agent-as-curator as the key weakness. |
+| No `manas serve` | Phase 1 item 6. Stdio MCP server with composed tools. | Replaces mcpjungle's role; enables `wake_up` (chitta + yojana). |

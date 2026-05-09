@@ -20,8 +20,7 @@ This doc describes what's actually built and how it fits together. Subsystem-int
 | **sangha** | संघ — assembly | Session coordination: registry, advisory locks, broadcast inbox | SQLite | **v0.1.0 implemented** |
 | **kosha** | कोश — treasury | Document comprehension over smriti (PDFs, epubs, papers); semantic search and citation | Postgres + pgvector | Design |
 | **yojana** | योजना — plan | Typed task graph: projects, tasks, edges, context shapes | SQLite | Design |
-| **mcpjungle** | (Go, MIT-listed MPL-2.0) | Single MCP gateway, Tool Groups, ACL | — | Integrated |
-| **manas-cli** | — | Ops surface, lifecycle commands, sideband daemon, harness adapters | — | Docs only |
+| **manas-cli** | — | Ops surface, lifecycle commands, `manas serve` (HTTP MCP composing tools from all subsystems), sideband daemon, harness adapters | Rust | **v0.1.0 implemented** |
 
 Sutra replaces the previously-external `qartez`. All owned subsystems are Rust binaries.
 
@@ -88,33 +87,15 @@ Typed task graph: projects, tasks, edges (`depends_on`, `blocks`, `relates_to`, 
 
 **Where context-shape resolution lives:** `yojana_context` returns the *unresolved bundle* (task fields, edges, ref list) from yojana itself. Cross-joins to sutra outlines, chitta observations, ADRs on disk, etc. happen in **manas-cli** (per principle 9). The agent calls a single compound tool that manas-cli surfaces; manas-cli internally fans out to yojana → sutra → chitta → disk and assembles the U-shape result. Yojana's binary stays a pure task-graph server.
 
-### mcpjungle — gateway
-**Contract:** present a single MCP endpoint that fronts every other subsystem and enforces who can call what.
-
-Go binary. Provides:
-- A single MCP endpoint upstream of chitta, smriti, sutra, sangha (and later kosha, yojana).
-- **Tool Groups** — named sets of tools. `memory` (chitta), `code` (sutra), `filesystem` (smriti), `presence` (sangha), `full` (everything). Existing in source: `internal/model/tool_group.go`, `internal/service/toolgroup/`, `internal/api/tool_groups.go`, e2e tests.
-- **ACL** — which client/connection can invoke which Tool Group. This is the mechanism that makes blind-boot a *hard* contract: a code-review session is bound to `code` only and physically cannot reach chitta even if the LLM tries.
-- OTEL hooks for token-cost instrumentation (deferred — wire when needed).
-
-Known gaps to work around: no resource templates (smriti uses tool-based reads — already designed this way), no resource subscriptions (handled via manas-cli sideband), Tool Groups are tools-only (resources not group-scoped — accepted).
-
-### manas-cli — ops surface (planned)
+### manas-cli — ops surface + compound tool host
 **Contract:** the human-and-harness-facing CLI that boots sessions, runs lifecycle skills, hosts the sideband daemon, **and owns every cross-tier compound operation** (per principle 9).
 
 Responsibilities:
-1. **Boot** — claim/inject the right Tool Group binding, seed the system prompt, hand off to the LLM harness (Claude Code, Gemini CLI, opencode, or eventually local).
-2. **Skill shells** — claim sangha locks, inject transcript paths, execute LLM body, release locks, write outputs. The Rust shell of two-layer skills (see below).
-3. **Sideband daemon** — narrow IPC for cross-subsystem coordination that must not depend on LLM cooperation (smriti→chitta path-move sync, kosha event subscription, etc.).
-4. **Compound tool host** — implements every cross-tier read/write that bundles more than one subsystem: yojana context-shape resolution, darshana joined views, future report generators. Subsystem servers never call each other; manas-cli is the only place that fans out across tiers.
+1. **Boot** — `manas warm` writes per-harness MCP configs pointing at each subsystem's HTTP endpoint. Supports Claude Code, Gemini CLI, Codex CLI, opencode.
+2. **Serve** — `manas serve` runs an HTTP MCP server that composes tools from all configured subsystems into a single endpoint. Compound tools (cross-tier reads, context-shape resolution) live here.
+3. **Skill shells** — claim sangha locks, inject transcript paths, execute LLM body, release locks, write outputs. The Rust shell of two-layer skills (see below).
+4. **Sideband daemon** — narrow IPC for cross-subsystem coordination that must not depend on LLM cooperation (smriti→chitta path-move sync, kosha event subscription, etc.).
 5. **Health + observability** — `manas health`, `manas warm`, `manas done`, `manas reflect`.
-
-The boot contract (must be specified before anything else in manas-cli ships):
-- Which endpoint/config the harness receives, who creates it, who rotates/removes it, and what happens if binding fails.
-- Fallback to per-server MCP is an **emergency-only mode**, never a normal degraded path — it removes the ACL.
-- An integration test that a minimal/code session cannot reach chitta, smriti content-read, or sangha even when the agent calls them by exact tool name.
-
-These four points are the boot contract; they can be specified and tested independently of the rest of manas-cli landing.
 
 ---
 
@@ -124,7 +105,7 @@ The architecture has two kinds of guarantees and they are not interchangeable.
 
 | Kind | Where enforced | Examples |
 |---|---|---|
-| **Hard** — cannot be violated | Code, schema, ACL, lock lifecycle | mcpjungle Tool Group ACL, sangha advisory locks managed by manas-cli, chitta unique constraints, smriti privacy gate, freshness envelope fields, MCP schemas |
+| **Hard** — cannot be violated | Code, schema, lock lifecycle | sangha advisory locks managed by manas-cli, chitta unique constraints, smriti privacy gate, freshness envelope fields, MCP schemas |
 | **Soft** — LLM cooperation required | CLAUDE.md, skill markdown bodies | "Store observations proactively," "Read chitta first when starting work," skill prose instructions |
 
 This distinction is load-bearing.
@@ -165,7 +146,7 @@ The principle: the agent is always *capable* of continuity, but doesn't *impose*
 
 1. **Subsystems don't call each other directly.** Cross-tier coordination flows through one of two named seams:
    - **(a) the agent**, by default. The LLM reads from one tier, decides what to do, calls into another. Visible in transcript, easy to inspect, tokens cost real money.
-   - **(b) the manas-cli sideband**, when the operation is deterministic, frequent, or must not depend on LLM cooperation. Examples: smriti→chitta path-move sync, kosha subscribing to smriti's event stream, mcpjungle compound tools.
+   - **(b) the manas-cli sideband**, when the operation is deterministic, frequent, or must not depend on LLM cooperation. Examples: smriti→chitta path-move sync, kosha subscribing to smriti's event stream.
 
    This is a revision of the previous absolute "subsystems don't call each other" rule. The previous rule was already eroding by exception (darshana, sideband, compound tools). Naming the second seam makes the architecture honest.
 
@@ -270,8 +251,7 @@ What happens when X is down or contended. Each fallback is classified:
 | sangha down | `/done` | Best-effort: write handoff without lock. Warn user about possible concurrent-write race. | secure-degraded |
 | sangha lock TTL expired mid-`/reflect` | `/reflect` | Re-claim with a fresh idempotency check; if state shows another writer, abort. | secure-degraded |
 | manas-cli sideband down | smriti path-move | Event queues in smriti; chitta updates lag until sideband recovers. | secure-degraded |
-| mcpjungle down | normal session | **Refuse.** Per-server MCP fallback removes Tool Group ACL — minimal/rich boot is no longer enforceable. | prohibited |
-| mcpjungle down | operator running `manas dev --no-gateway` | Per-server MCP config, banner warns that ACL is off, every tool call logs the bypass. | insecure-emergency |
+| manas serve down | normal session | Compound tools unavailable. Individual subsystem tools still reachable via per-service MCP configs. Warn user. | secure-degraded |
 
 This table is incomplete. It should grow as new failure modes are observed. New entries must declare a class; "fall back transparently" is not an option for anything that holds a hard contract.
 
@@ -287,7 +267,7 @@ Every read operation is labelled with a cost tier. (Labels not yet enforced; int
 | Medium | `chitta_search_memories`, `sutra_grep`, `smriti_find` |
 | Expensive | `sutra_impact`, `sutra_diff_impact`, `kosha_search` (vector), darshana cross-tier joins |
 
-Per-call budget extends the existing `chitta.search_memories.max_tokens` parameter to all read tools. mcpjungle wires OTEL token instrumentation when a budget concept lands. Until then, the cost model is documentation, not enforcement.
+Per-call budget extends the existing `chitta.search_memories.max_tokens` parameter to all read tools. manas serve can wire OTEL token instrumentation when a budget concept lands. Until then, the cost model is documentation, not enforcement.
 
 ---
 
@@ -364,7 +344,7 @@ These extend the chitta principles in `chitta/docs/principles.md` and apply syst
 - **Mental-model retirement.** `metadata.retired_at` + `retirement_reason`. `search_memories` excludes retired by default.
 - **Provenance/derivations.** Track which observations a mental model was synthesized from, in which session, with which prompt.
 - **Observation eviction.** What happens to observations consolidated into a mental model? To old un-consolidated observations? At what density does summarization kick in?
-- **Cost-model enforcement.** When does mcpjungle gate calls by budget? Today it's documentation only.
+- **Cost-model enforcement.** When does manas serve gate calls by budget? Today it's documentation only.
 - **Cross-machine smriti / sangha.** Out of scope until real demand.
 - **Yojana DB location.** Per-user (`~/.yojana/<slug>.db`) or per-repo (`<repo>/.yojana/index.db`). Lean per-user.
 - **Darshana split.** Whether darshana ships as a single project or as two (interactive view + precomputed report).

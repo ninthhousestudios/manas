@@ -42,7 +42,7 @@ All data local. Every derived structure (embeddings, graphs, summaries) is re-de
 ## 6. Hard vs soft contracts named
 
 When you write a contract, say which it is.
-- **Hard** contracts are enforced by code, schema, ACL, or lock lifecycle. Examples: mcpjungle Tool Group binding, sangha lock TTL, chitta unique constraints, smriti privacy gate.
+- **Hard** contracts are enforced by code, schema, or lock lifecycle. Examples: sangha lock TTL, chitta unique constraints, smriti privacy gate.
 - **Soft** contracts depend on LLM cooperation. Examples: CLAUDE.md instructions, skill markdown bodies, observation discipline.
 
 If a contract is hard, point at its enforcement. If soft, point at the fallback for non-cooperation.
@@ -74,7 +74,7 @@ Cross-tier coordination flows through one of two named seams:
 
 Direct subsystem-to-subsystem calls (smriti calling chitta, sutra calling smriti) are out-of-policy. **Any compound behavior that touches more than one subsystem lives in manas-cli — never inside a subsystem server's binary.** This includes: yojana context-shape resolution (cross-joins to chitta/sutra/disk), darshana joined views, kosha event subscription against smriti, smriti→chitta path-move sync, future report generators, and any "convenience" tool that bundles results from multiple tiers. Subsystem servers stay pure: their tools answer questions about their own tier only.
 
-mcpjungle may surface a compound tool *as* a single MCP tool, but the implementation routes through manas-cli, not through a subsystem.
+`manas serve` may surface a compound tool as a single MCP tool, but the implementation routes through manas-cli, not through a subsystem.
 
 **Rules out:** silent IPC between subsystems. "Just this once" coupling. Calling another subsystem's DB directly. A subsystem server reaching into another subsystem to "enrich" a response.
 

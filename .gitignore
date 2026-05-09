@@ -4,6 +4,12 @@ smriti/
 sutra/
 sangha/
 mcpjungle/
+yojana/
+vidhi/
+manas-cli/
+kosha/
+karma/
+vidya/
 
 # Subsystems that are docs-only today but will become their own repos.
 # Keep tracked here for now; move out when they get their own crates.
@@ -13,6 +19,11 @@ mcpjungle/
 .agents/
 .qartez/
 .claude/
+.sutra/
+
+# Archived subtrees and local handoff logs.
+archived/
+docs/.handoffs/
 
 # Build artifacts.
 target/

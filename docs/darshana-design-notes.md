@@ -1,10 +1,34 @@
-# darshana — design notes for the eventual build
+# darshana — cross-tier analytical joins
 
-Status: notes (deferred — see roadmap phase 5)
-Date: 2026-05-03
-Origin: extracted from a riff on a vibes-as-framework Reddit post about "Co-Relational Field Emergence" — bullets that, stripped of mysticism, named real engineering problems for the cross-tier join layer. This doc captures the operational kernels worth remembering when darshana is no longer deferred.
+Status: decided (2026-05-07)
+Date: 2026-05-03 (notes), 2026-05-07 (decision)
+Origin: extracted from a riff on a vibes-as-framework Reddit post about "Co-Relational Field Emergence" — bullets that, stripped of mysticism, named real engineering problems for the cross-tier join layer.
 
-These are *not* requirements. They are notes-to-future-self: things easy to forget when you start building, that will hurt to bolt on later.
+## decision: darshana is a feature area within manas-cli, not a separate subsystem
+
+Darshana is a set of cross-tier analytical compound tools hosted by `manas serve`. It is not its own daemon or MCP server. Rationale:
+
+- Darshana owns no data — it's pure cross-tier joins.
+- By principle 9, cross-tier composition lives in manas-cli. Giving darshana its own server would require it to call into chitta, sutra, smriti, yojana — exactly the subsystem-to-subsystem coupling the architecture prohibits.
+- Tools are prefixed `darshana_*` in MCP, distinguishing them from operational tools (`manas_health`, etc.).
+
+**The boundary:** darshana tools are "give me understanding across tiers" (analytical joins). Other manas serve tools are "manage the machinery" (health, warm, passthrough). The darshana design principles (freshness envelopes, absence-as-result, token budgets, provenance) apply to darshana tools, not operational ones.
+
+**Primary consumers:** agents, not humans. 91% of manas sessions already cross 2+ tiers (E2 experiment, 2026-05-07). Agents currently do a poor-man's darshana manually — sequential calls to chitta, sutra, yojana at session start. Darshana replaces that fan-out with joined tools.
+
+**Build order:**
+1. `darshana_impact` — cross-tier blast radius ("file X changed → which decisions/tasks/citations are stale?")
+2. `darshana_orphans` — gap detection across tiers (broken refs, missing coverage)
+3. `darshana_context` — joined session-start view (replaces manual boot fan-out)
+4. `darshana_report` — precomputed summary (nightly or on-demand)
+
+**Gating experiments (completed):**
+- E1 (manas/6): 61% of chitta path refs resolve to real files. 39% breakage from historical repo moves (nhs/, ogham). Sideband daemon would prevent future breakage.
+- E2 (manas/7): 91% of sessions touch 2+ tiers, 71% touch 3+. Most common combo: chitta+sangha+sutra+yojana. Cross-tier querying is the norm.
+
+## design notes
+
+Notes-to-future-self: things easy to forget when building, that will hurt to bolt on later.
 
 ---
 
@@ -120,6 +144,6 @@ The riff is preserved in the session transcript; the operational kernels are abo
 
 ---
 
-## graduation criteria (still — see roadmap phase 5)
+## graduation criteria — MET (2026-05-07)
 
-Before any of the above gets implemented, the two experiments in `docs/todo.md` (E1: chitta path-resolution audit, E2: cross-tier-query frequency) decide whether darshana is built at all. If E2 shows few cross-tier sessions in the actual transcript record, this doc is permission to *not* build, not a checklist to follow.
+E1 and E2 both completed. E2 decisively validates the premise (91% cross-tier sessions). E1 shows path infrastructure needs work (61% resolution) but the breakage is historical, not systemic. Decision: proceed with darshana. External_refs backfill and sideband daemon address the E1 weakness over time.
