@@ -10,6 +10,7 @@ manas-cli/
 kosha/
 karma/
 vidya/
+.codex
 
 # Subsystems that are docs-only today but will become their own repos.
 # Keep tracked here for now; move out when they get their own crates.
