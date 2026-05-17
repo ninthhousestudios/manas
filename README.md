@@ -1,10 +1,10 @@
 # manas
 
-[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 **manas** (मनस् — "mind") is a collaborative cognition system for humans and agents. It's a federation of agent-native subsystems that provide memory, perception, coordination, planning, code intelligence, and document comprehension to LLM-driven workflows. The LLM is the cognition; manas is its body.
 
-This is a monorepo. Each subsystem is a standalone Rust binary with its own MCP server surface, systemd unit, and README.
+Each subsystem is a standalone Rust binary with its own MCP server surface, systemd unit, and README.
 
 ## Subsystems
 
@@ -56,4 +56,4 @@ This is a personal project — built for my own AI workflow. It's public because
 
 ## License
 
-MPL-2.0 for all subsystems except [vidhi](vidhi/) (MIT, forked from [mattpocock/claude-code-skills](https://github.com/mattpocock/claude-code-skills)).
+AGPL-3.0 for all subsystems except [vidhi](vidhi/) (MIT, forked from [mattpocock/claude-code-skills](https://github.com/mattpocock/claude-code-skills)).
