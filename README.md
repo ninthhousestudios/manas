@@ -10,13 +10,13 @@ Each subsystem is a standalone Rust binary with its own MCP server surface, syst
 
 | Subsystem | Sanskrit | What it does | Status |
 |---|---|---|---|
-| [chitta](https://github.com/ninthhousestudios/chitta/) | चित्त — consciousness | Persistent working model of a person: observations, decisions, mental models, session episodes. Postgres + pgvector, BGE-M3 ONNX embeddings, hybrid retrieval. | v0.3.0 |
-| [smriti](https://github.com/ninthhousestudios/smriti/) | स्मृति — remembrance | Content-addressed filesystem indexer. Tracks files by BLAKE3 hash, detects moves/copies/edits, emits lifecycle events. SQLite + FTS5. | v0.2.3 |
-| [sutra](https://github.com/ninthhousestudios/sutra/) | सूत्र — thread | Code intelligence via tree-sitter. Symbols, calls, deps, blast radius, hotspots, dead code, co-change analysis. SQLite. | v0.1.0 |
+| [chitta](https://github.com/ninthhousestudios/chitta/) | चित्त — consciousness | Persistent working model of a person: observations, decisions, mental models, session episodes. Postgres + pgvector, BGE-M3 ONNX embeddings, hybrid retrieval. | v0.3.2 |
+| [smriti](https://github.com/ninthhousestudios/smriti/) | स्मृति — remembrance | Content-addressed filesystem indexer. Tracks files by BLAKE3 hash, detects moves/copies/edits, emits lifecycle events. SQLite + FTS5. | v0.3.5 |
+| [sutra](https://github.com/ninthhousestudios/sutra/) | सूत्र — thread | Code intelligence via tree-sitter. Symbols, calls, deps, blast radius, hotspots, dead code, co-change analysis. SQLite. | v0.3.4 |
 | [sangha](https://github.com/ninthhousestudios/sangha/) | संघ — assembly | Session coordination daemon. Registry with heartbeat TTL, advisory resource locks, broadcast inbox. SQLite. | v0.1.0 |
-| [kosha](https://github.com/ninthhousestudios/kosha/) | कोश — treasury | Document comprehension. PDFs, EPUBs, scanned pages via multimodal embeddings (Qwen3-VL). Postgres + pgvector. | design |
-| [vidya](https://github.com/ninthhousestudios/vidya/) | विद्या — knowledge | Structured knowledge graph with provenance. Cited, tradition-aware domain facts. Postgres. | design |
-| [yojana](https://github.com/ninthhousestudios/yojana/) | योजना — plan | Local task graph. Projects, tasks, dependency edges, context shapes. SQLite. | v0.1.0 |
+| [kosha](https://github.com/ninthhousestudios/kosha/) | कोश — treasury | Document comprehension. PDFs, EPUBs, scanned pages via multimodal embeddings (Qwen3-VL). Postgres + pgvector. | v0.1.0 |
+| [vidya](https://github.com/ninthhousestudios/vidya/) | विद्या — knowledge | Structured knowledge graph with provenance. Cited, tradition-aware domain facts. Postgres. | v0.4.1 |
+| [yojana](https://github.com/ninthhousestudios/yojana/) | योजना — plan | Local task graph. Projects, tasks, dependency edges, context shapes. SQLite. | v0.3.3 |
 | [manas-cli](https://github.com/ninthhousestudios/manas-cli/) | — | Ops CLI: `manas health`, `manas warm`, `manas done`, `manas serve`. Harness adapters for Claude Code, Codex, Gemini. | v0.1.2 |
 | [vidhi](https://github.com/ninthhousestudios/vidhi/) | विधि — method | Engineering methodology skills for Claude Code agents. Planning, TDD, diagnosis, architecture. | v0.1.0 |
 | [karma](https://github.com/ninthhousestudios/karma/) | कर्म — action | Personal assistant layer: triggers, connectors, approval gate. | design only |
