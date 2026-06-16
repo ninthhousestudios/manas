@@ -26,12 +26,7 @@ arjuna, aion, sunflare).
    (fletch-astro/4, /5 — use the engine's native nakshatra class, not
    `int(lon/13°20′)`).
 
-3. **Custom ayanamsa codes differ between bindings.** Dart and Python
-   swisseph disagree on code 98 (Dhruva) by ~4.7° — a library-level
-   divergence, not fixable in an adapter (fletch-astro/4). Pin and verify
-   ayanamsa values per binding before trusting cross-engine comparisons.
-
-4. **True-node tolerance is 0.005°** across SWE versions for Rahu/Ketu
+3. **True-node tolerance is 0.005°** across SWE versions for Rahu/Ketu
    (fletch-astro/5); tighter tolerances produce false divergences.
 
 ## Cross-engine comparison sweeps

@@ -12,7 +12,7 @@ Each subsystem is a standalone Rust binary with its own MCP server surface, syst
 |---|---|---|---|
 | [chitta](https://github.com/ninthhousestudios/chitta/) | चित्त — consciousness | Persistent working model of a person: observations, decisions, mental models, session episodes. Postgres + pgvector, BGE-M3 ONNX embeddings, hybrid retrieval. | v0.3.2 |
 | [smriti](https://github.com/ninthhousestudios/smriti/) | स्मृति — remembrance | Content-addressed filesystem indexer. Tracks files by BLAKE3 hash, detects moves/copies/edits, emits lifecycle events. SQLite + FTS5. | v0.3.5 |
-| [sutra](https://github.com/ninthhousestudios/sutra/) | सूत्र — thread | Code intelligence via tree-sitter. Symbols, calls, deps, blast radius, hotspots, dead code, co-change analysis. SQLite. | v0.3.4 |
+| [sutra](https://github.com/ninthhousestudios/sutra/) | सूत्र — thread | Code intelligence via tree-sitter. Symbols, calls, deps, blast radius, hotspots, dead code, co-change analysis. SQLite. | v0.7.8 |
 | [sangha](https://github.com/ninthhousestudios/sangha/) | संघ — assembly | Session coordination daemon. Registry with heartbeat TTL, advisory resource locks, broadcast inbox. SQLite. | v0.1.0 |
 | [kosha](https://github.com/ninthhousestudios/kosha/) | कोश — treasury | Document comprehension. PDFs, EPUBs, scanned pages via multimodal embeddings (Qwen3-VL). Postgres + pgvector. | v0.1.0 |
 | [vidya](https://github.com/ninthhousestudios/vidya/) | विद्या — knowledge | Structured knowledge graph with provenance. Cited, tradition-aware domain facts. Postgres. | v0.4.1 |
