@@ -1,9 +1,9 @@
 # MCP server discipline (rmcp / Rust)
 
 Ledger row L4. Evidence: manas/22, chitta/9, chitta/46, manas-harness/7,
-panini/7, plus the yojana schema convention. Every item here failed silently
-from the client's perspective and was found at integration time, not by unit
-tests.
+panini/7, yojana/32, yojana/33, yojana/37, plus the yojana schema convention.
+Every item here failed silently from the client's perspective and was found
+at integration time, not by unit tests.
 
 ## Rules
 
@@ -39,3 +39,11 @@ tests.
    needs the init handshake, `mcp-session-id` header propagation, and SSE
    parsing — budget for it when a service must call a sibling directly
    (manas-harness/7).
+
+8. **Responses are paid by every consumer, on every call.** Default response
+   shapes (full UUIDs, pretty-printed JSON, echoing the whole entity in a
+   create/update ack) cost far more tokens than agent consumers use. Slim
+   acks to the fields a caller acts on — yojana/32 cut create/update acks
+   ~707→26 tokens and yojana/33 halved total schema tokens with no
+   functionality loss. Design the response for the agent reading it, not
+   for debuggability (that's what logs are for).
